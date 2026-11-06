@@ -1,0 +1,14 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# Generados por colcon
+build/
+install/
+log/
+
+# Cache de Python
+__pycache__/
+
+# Modelos de YOLO (Ultralytics los descarga solos)
+*.pt

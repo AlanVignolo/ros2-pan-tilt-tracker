@@ -1,0 +1,21 @@
+[workspace]
+authors = ["Alan <alanvignolo1999@gmail.com>"]
+channels = ["https://prefix.dev/robostack-jazzy", "conda-forge"]
+name = "seguidor_ws"
+platforms = ["linux-aarch64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+ros-jazzy-desktop = ">=0.11.0,<0.12"
+ros-dev-tools = ">=1.0.3,<2"
+pyserial = ">=3.5,<4"
+ros-jazzy-usb-cam = ">=0.8.1,<0.9"
+ultralytics = ">=8.4.203,<9"
+ros-jazzy-cv-bridge = ">=4.1.0,<5"
+torchvision = ">=0.29.2,<0.30"
+ros-jazzy-vision-msgs = ">=4.1.1,<5"
+
+[target.linux.activation]
+scripts = ["install/setup.sh"]
