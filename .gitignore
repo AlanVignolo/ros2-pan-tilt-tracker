@@ -12,3 +12,7 @@ __pycache__/
 
 # Modelos de YOLO (Ultralytics los descarga solos)
 *.pt
+
+# Generados por CubeIDE
+Debug/
+Release/
