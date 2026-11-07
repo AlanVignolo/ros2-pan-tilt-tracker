@@ -1,2 +1,6 @@
 # SCM syntax highlighting & preventing 3-way merges
 pixi.lock merge=binary linguist-language=YAML linguist-generated=true -diff
+
+# Finales de línea: en el repositorio siempre LF.
+# Así no cuenta como cambio que CubeMX reescriba archivos con otro final de línea.
+* text=auto
