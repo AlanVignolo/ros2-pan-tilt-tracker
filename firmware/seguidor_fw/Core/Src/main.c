@@ -70,6 +70,12 @@ static int8_t dir_actual = 0;
 #define FC_ACTIVO   GPIO_PIN_RESET   // botones NO: apretado = 0
 static uint8_t bloqueo_pos = 0;   // se tocó FC_POS, no avanzar hacia +
 static uint8_t bloqueo_neg = 0;   // se tocó FC_NEG, no avanzar hacia −
+
+// Devuelve 1 si el interruptor está en ON (pin a GND = 0), 0 si está en OFF.
+// Es una macro: el compilador reemplaza HABILITADO() por la lectura del pin
+// en cada lugar donde aparece. Evita repetir la misma línea larga 4 veces.
+#define HABILITADO()  (HAL_GPIO_ReadPin(HABILITAR_GPIO_Port, HABILITAR_Pin) == GPIO_PIN_RESET)
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -118,39 +124,48 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
 	if (pul_alto)
 	{
-	    HAL_GPIO_WritePin(PUL_GPIO_Port, PUL_Pin, GPIO_PIN_RESET);
-	    pul_alto = 0;
-	    return;
+	HAL_GPIO_WritePin(PUL_GPIO_Port, PUL_Pin, GPIO_PIN_RESET);
+	pul_alto = 0;
+	return;
 	}
 
-	  int32_t error = pan_obj - pan_pos;
-	  if (error == 0) return;
+	// Interruptor en OFF: no se da ningún paso.
+	// Además se cancela el objetivo, para que al volver a ON
+	// el motor no salte a una orden vieja que quedó pendiente.
+	if (!HABILITADO())
+	{
+	pan_obj = pan_pos;
+	return;
+	}
 
-	  int8_t dir = (error > 0) ? 1 : -1;
+	int32_t error = pan_obj - pan_pos;
+	if (error == 0) return;
 
-	  if (dir > 0 && HAL_GPIO_ReadPin(FC_POS_GPIO_Port, FC_POS_Pin) == FC_ACTIVO) bloqueo_pos = 1;
-	  if (dir < 0 && HAL_GPIO_ReadPin(FC_NEG_GPIO_Port, FC_NEG_Pin) == FC_ACTIVO) bloqueo_neg = 1;
+	int8_t dir = (error > 0) ? 1 : -1;
 
-	  if ((dir > 0 && bloqueo_pos) || (dir < 0 && bloqueo_neg))
-	  {
-	    pan_obj = pan_pos;
-	    return;
-	  }
+	if (dir > 0 && HAL_GPIO_ReadPin(FC_POS_GPIO_Port, FC_POS_Pin) == FC_ACTIVO) bloqueo_pos = 1;
+	if (dir < 0 && HAL_GPIO_ReadPin(FC_NEG_GPIO_Port, FC_NEG_Pin) == FC_ACTIVO) bloqueo_neg = 1;
 
-	  if (dir != dir_actual)
-	  {
-	    HAL_GPIO_WritePin(DIR_GPIO_Port, DIR_Pin,
-	                      (dir > 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-	    dir_actual = dir;
-	    return;
-	  }
+	if ((dir > 0 && bloqueo_pos) || (dir < 0 && bloqueo_neg))
+	{
+	pan_obj = pan_pos;
+	return;
+	}
 
-	  HAL_GPIO_WritePin(PUL_GPIO_Port, PUL_Pin, GPIO_PIN_SET);
-	  pul_alto = 1;
-	  pan_pos += dir;
+	if (dir != dir_actual)
+	{
+	HAL_GPIO_WritePin(DIR_GPIO_Port, DIR_Pin,
+					  (dir > 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+	dir_actual = dir;
+	return;
+	}
 
-	  if (dir > 0) bloqueo_neg = 0;
-	  if (dir < 0) bloqueo_pos = 0;
+	HAL_GPIO_WritePin(PUL_GPIO_Port, PUL_Pin, GPIO_PIN_SET);
+	pul_alto = 1;
+	pan_pos += dir;
+
+	if (dir > 0) bloqueo_neg = 0;
+	if (dir < 0) bloqueo_pos = 0;
 }
 
 static void procesar_linea(const char *s)
@@ -164,9 +179,19 @@ static void procesar_linea(const char *s)
 	    int fp = (HAL_GPIO_ReadPin(FC_POS_GPIO_Port, FC_POS_Pin) == FC_ACTIVO);
 		long pos = (long)pan_pos * 3600 / PASOS_POR_VUELTA;
 		long obj = (long)pan_obj * 3600 / PASOS_POR_VUELTA;
-	    snprintf(resp, sizeof(resp), "ST POS%ld OBJ%ld FN%d FP%d BN%d BP%d\r\n", pos, obj, fn, fp, bloqueo_neg, bloqueo_pos);
-		HAL_UART_Transmit(&huart2, (uint8_t *)resp, strlen(resp), 100);
+	    snprintf(resp, sizeof(resp), "ST POS%ld OBJ%ld FN%d FP%d BN%d BP%d EN%d\r\n",
+	             pos, obj, fn, fp, bloqueo_neg, bloqueo_pos, HABILITADO());
+	    HAL_UART_Transmit(&huart2, (uint8_t *)resp, strlen(resp), 100);
 		return;
+	}
+
+	// Interruptor en OFF: no se mueve nada. Se responde OFF
+	// para que la Raspberry sepa que la orden no se ejecutó.
+	if (!HABILITADO())
+	{
+	snprintf(resp, sizeof(resp), "OFF\r\n");
+	HAL_UART_Transmit(&huart2, (uint8_t *)resp, strlen(resp), 100);
+	return;
 	}
 
 	if(sscanf(s, "P%ld T%ld", &pan, &tilt) == 2)
@@ -240,17 +265,24 @@ int main(void)
 		  procesar_linea(linea);
 		  linea_lista = 0;
 	  }
-	  if (HAL_GPIO_ReadPin(FC_NEG_GPIO_Port, FC_NEG_Pin) == FC_ACTIVO ||
-	      HAL_GPIO_ReadPin(FC_POS_GPIO_Port, FC_POS_Pin) == FC_ACTIVO)
-	  {
-		  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
-	  }
-	  else if (HAL_GetTick() - t_led >= 500)
-	  {
-		  t_led = HAL_GetTick();
-		  HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
-	  }
-  }
+	// LD2: apagado = motores deshabilitados
+	//      fijo     = algún fin de carrera activo
+	//      parpadea = todo normal
+	if (!HABILITADO())
+	{
+	  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+	}
+	else if (HAL_GPIO_ReadPin(FC_NEG_GPIO_Port, FC_NEG_Pin) == FC_ACTIVO ||
+			 HAL_GPIO_ReadPin(FC_POS_GPIO_Port, FC_POS_Pin) == FC_ACTIVO)
+	{
+	  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
+	}
+	else if (HAL_GetTick() - t_led >= 500)
+	{
+	  t_led = HAL_GetTick();
+	  HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+	}
+	}
   /* USER CODE END 3 */
 }
 
@@ -442,6 +474,7 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, LD2_Pin|PUL_Pin, GPIO_PIN_RESET);
@@ -462,6 +495,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(DIR_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : HABILITAR_Pin */
+  GPIO_InitStruct.Pin = HABILITAR_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(HABILITAR_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : FC_NEG_Pin */
   GPIO_InitStruct.Pin = FC_NEG_Pin;
