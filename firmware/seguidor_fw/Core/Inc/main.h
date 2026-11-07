@@ -63,6 +63,8 @@ void Error_Handler(void);
 #define LD2_GPIO_Port GPIOA
 #define DIR_Pin GPIO_PIN_10
 #define DIR_GPIO_Port GPIOB
+#define HABILITAR_Pin GPIO_PIN_7
+#define HABILITAR_GPIO_Port GPIOC
 #define PUL_Pin GPIO_PIN_8
 #define PUL_GPIO_Port GPIOA
 #define FC_NEG_Pin GPIO_PIN_10
