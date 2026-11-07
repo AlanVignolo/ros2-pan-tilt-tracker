@@ -25,7 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'nodo_puente_serie = seguidor.nodo_puente_serie:main',
-            'nodo_detector = seguidor.nodo_detector:main'
-        ],
+            'nodo_detector = seguidor.nodo_detector:main',
+            'nodo_control = seguidor.nodo_control:main',        ],
     },
 )
