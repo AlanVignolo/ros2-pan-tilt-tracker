@@ -76,6 +76,12 @@ static uint8_t bloqueo_neg = 0;   // se tocó FC_NEG, no avanzar hacia −
 // en cada lugar donde aparece. Evita repetir la misma línea larga 4 veces.
 #define HABILITADO()  (HAL_GPIO_ReadPin(HABILITAR_GPIO_Port, HABILITAR_Pin) == GPIO_PIN_RESET)
 
+// Último estado del interruptor que se le informó a la Raspberry.
+static uint8_t en_informado = 0;
+// Última vez (en ms) que el pin coincidía con lo informado.
+// Sirve para medir cuánto tiempo lleva el pin en un valor distinto.
+static uint32_t t_en_estable = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -168,6 +174,15 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	if (dir < 0) bloqueo_pos = 0;
 }
 
+// Envía a la Raspberry el estado del interruptor: "EN1" habilitado, "EN0" deshabilitado.
+// Se llama al arrancar y cada vez que el interruptor cambia.
+static void informar_en(uint8_t en)
+{
+	char msg[8];
+	snprintf(msg, sizeof(msg), "EN%d\r\n", en);
+	HAL_UART_Transmit(&huart2, (uint8_t *)msg, strlen(msg), 100);
+}
+
 static void procesar_linea(const char *s)
 {
 	char resp[64];
@@ -246,11 +261,19 @@ int main(void)
   MX_USART2_UART_Init();
   MX_TIM3_Init();
   MX_TIM2_Init();
+
+
+
   /* USER CODE BEGIN 2 */
   HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
   uint32_t t_led = HAL_GetTick();
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
   HAL_TIM_Base_Start_IT(&htim2);
+
+  // Informar el estado inicial del interruptor al arrancar.
+  en_informado = HABILITADO();
+  t_en_estable = HAL_GetTick();
+  informar_en(en_informado);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -265,6 +288,20 @@ int main(void)
 		  procesar_linea(linea);
 		  linea_lista = 0;
 	  }
+
+	// Antirrebote del interruptor, solo para el aviso a la Raspberry.
+	// Si el pin cambió, se espera a que pasen 20 ms seguidos sin volver atrás.
+	uint8_t en_ahora = HABILITADO();
+	if (en_ahora == en_informado)
+	{
+	  t_en_estable = HAL_GetTick();
+	}
+	else if (HAL_GetTick() - t_en_estable >= 20)
+	{
+	  en_informado = en_ahora;
+	  informar_en(en_informado);
+	}
+
 	// LD2: apagado = motores deshabilitados
 	//      fijo     = algún fin de carrera activo
 	//      parpadea = todo normal
