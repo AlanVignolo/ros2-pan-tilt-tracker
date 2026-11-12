@@ -18,8 +18,8 @@ class NodoControl(Node):
         self.declare_parameter('fov_vertical', 45.0)
         self.declare_parameter('ganancia', 0.4)  # Kp: fracción del error corregida por cuadro
         self.declare_parameter('zona_muerta', 2.0)  # Grados de error tolerados, evita jitter
-        self.declare_parameter('signo_pan', 1.0)  # ±1 según el montaje de los servos
-        self.declare_parameter('signo_tilt', 1.0)
+        self.declare_parameter('signo_pan', -1.0)  # -1: con este montaje, el stepper gira al revés que el error en la imagen
+        self.declare_parameter('signo_tilt', -1.0)  # -1: con este montaje, el servo se mueve al revés que el error en la imagen
         self.declare_parameter('pan_min', -85.0)  # Límites mecánicos del pan-tilt
         self.declare_parameter('pan_max', 85.0)
         self.declare_parameter('tilt_min', 0.0)
