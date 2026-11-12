@@ -132,10 +132,11 @@ class NodoPuenteSerie(Node):
             self.get_logger().info('Motores habilitados')
         else:
             self.get_logger().warning('Motores deshabilitados')
-            
+
     def destroy_node(self):
         self.cerrar_puerto()  # Libera el puerto al apagar el nodo
         super().destroy_node()
+
 
 def main():
     rclpy.init()

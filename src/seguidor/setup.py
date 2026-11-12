@@ -1,3 +1,5 @@
+import os  # Para armar rutas de carpetas
+from glob import glob  # Para buscar archivos por patrón, como *.launch.py
 from setuptools import find_packages, setup
 
 package_name = 'seguidor'
@@ -10,6 +12,8 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+         # Copia todos los launch files a install/share/seguidor/launch
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
