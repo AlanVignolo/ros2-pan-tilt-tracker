@@ -13,7 +13,7 @@ const char *IP_RASPBERRY = "192.168.0.50";  // dirección fija de la Raspberry p
 const uint16_t PUERTO = 5005;               // puerto donde la Raspberry escucha
 
 // --- Joystick ---
-const int ZONA_MUERTA = 80;       // cuentas del ADC alrededor del centro que se toman como 0
+const int ZONA_MUERTA = 250;      // cuentas del ADC alrededor del centro que se toman como 0
 const uint32_t PERIODO_MS = 50;   // un envío cada 50 ms = 20 por segundo
 
 WiFiUDP udp;                 // objeto que maneja el envío de paquetes UDP
@@ -30,6 +30,17 @@ int medir_centro(int pin) {
     delay(5);
   }
   return suma / 32;
+}
+
+// Lee el pin 8 veces seguidas y devuelve el promedio.
+// El ruido sube y baja al azar, así que al promediar se cancela en parte.
+// 8 lecturas tardan unos pocos microsegundos: no afecta al envío cada 50 ms.
+int leer_promedio(int pin) {
+  long suma = 0;
+  for (int i = 0; i < 8; i++) {
+    suma += analogRead(pin);
+  }
+  return suma / 8;
 }
 
 // Convierte una lectura del ADC (0 a 4095) a un valor de -1000 a 1000.
@@ -87,8 +98,9 @@ void loop() {
   }
   t_ultimo_envio = millis();
 
-  int x = normalizar(analogRead(PIN_VRX), centro_x);
-  int y = normalizar(analogRead(PIN_VRY), centro_y);
+  // Cada eje se lee promediado, para reducir el ruido del ADC.
+  int x = normalizar(leer_promedio(PIN_VRX), centro_x);
+  int y = normalizar(leer_promedio(PIN_VRY), centro_y);
   int manual = (digitalRead(PIN_INTERRUPTOR) == LOW) ? 1 : 0;  // ON = pin en 0 = manual
 
   char mensaje[32];
