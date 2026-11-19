@@ -32,6 +32,7 @@ setup(
             'nodo_detector = seguidor.nodo_detector:main',
             'nodo_control = seguidor.nodo_control:main',        
             'nodo_joystick = seguidor.nodo_joystick:main',
+            'nodo_selector = seguidor.nodo_selector:main',
             ],
     },
 )
