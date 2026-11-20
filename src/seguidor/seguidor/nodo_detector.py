@@ -6,6 +6,8 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.parameter import Parameter
+from seguidor_interfaces.srv import SetTarget
 from sensor_msgs.msg import Image
 from ultralytics import YOLO
 from vision_msgs.msg import Detection2D, ObjectHypothesisWithPose
@@ -37,6 +39,10 @@ class NodoDetector(Node):
         self.cambiar_clase(self.get_parameter('clase_objetivo').value)
 
         self.add_on_set_parameters_callback(self.al_cambiar_parametros)  # Cambios en caliente
+
+        # Servicio para cambiar el objeto a seguir. Lo usan la terminal
+        # y, más adelante, el nodo de voz.
+        self.create_service(SetTarget, '/set_target', self.atender_set_target)
 
         self.bridge = CvBridge()  # Conversión sensor_msgs/Image <-> OpenCV
         self.pub_deteccion = self.create_publisher(Detection2D, '/deteccion', 10)
@@ -70,6 +76,20 @@ class NodoDetector(Node):
             elif p.name == 'umbral_confianza':
                 self.umbral = p.value
         return SetParametersResult(successful=True)
+
+    def atender_set_target(self, pedido, respuesta):
+        """Atiende /set_target: cambia la clase a través del parámetro."""
+        # set_parameters pasa por al_cambiar_parametros, que valida la clase.
+        # Devuelve una lista con un resultado por parámetro: tomamos el primero.
+        resultado = self.set_parameters(
+            [Parameter('clase_objetivo', value=pedido.clase)])[0]
+
+        respuesta.exito = resultado.successful
+        if resultado.successful:
+            respuesta.mensaje = f'Buscando "{pedido.clase}"'
+        else:
+            respuesta.mensaje = resultado.reason   # el motivo del rechazo
+        return respuesta
 
     def procesar_imagen(self, msg):
         if self.id_clase is None:
