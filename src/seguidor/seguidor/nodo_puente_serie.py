@@ -6,7 +6,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile # qos: Quality of Service, para publicar el estado del interruptor
 from std_msgs.msg import Bool, Float64MultiArray
 import serial
-
+from std_srvs.srv import Trigger
 
 class NodoPuenteSerie(Node):
     """Recibe ángulos por ROS2 y se los envía al micro por puerto serie."""
@@ -35,6 +35,9 @@ class NodoPuenteSerie(Node):
         # Mensaje esperado: data = [pan, tilt], en grados
         self.create_subscription(
             Float64MultiArray, '/cmd_angulos', self.recibir_angulos, 10)
+
+        # Servicio para pedir el homing del pan desde ROS2.
+        self.create_service(Trigger, '/homing', self.atender_homing)
 
     def abrir_puerto(self):
         try:
@@ -84,6 +87,31 @@ class NodoPuenteSerie(Node):
         except (serial.SerialException, OSError) as e:
             self.get_logger().error(f'Se perdió la conexión: {e}')
             self.cerrar_puerto()  # El watchdog se encarga de reconectar
+    
+    def atender_homing(self, pedido, respuesta):
+        """Le pide el homing al micro. Contesta al arrancarlo, no al terminar:
+        el resultado llega después por el puerto y lo informa procesar_linea."""
+        if self.serie is None:
+            respuesta.success = False
+            respuesta.message = 'Sin conexión con el micro'
+            return respuesta
+        if self.habilitado is False:
+            respuesta.success = False
+            respuesta.message = 'Motores deshabilitados: encendé el interruptor'
+            return respuesta
+
+        try:
+            self.serie.write(b'H\n')
+        except (serial.SerialException, OSError) as e:
+            self.get_logger().error(f'Se perdió la conexión: {e}')
+            self.cerrar_puerto()
+            respuesta.success = False
+            respuesta.message = 'Se perdió la conexión con el micro'
+            return respuesta
+
+        respuesta.success = True
+        respuesta.message = 'Homing iniciado: el resultado aparece en el log del puente'
+        return respuesta
 
     def leer_puerto(self):
         """Lee todas las líneas que llegaron del micro y las procesa."""
@@ -117,6 +145,20 @@ class NodoPuenteSerie(Node):
         elif linea == 'OFF':
             self.get_logger().warning(
                 'Motores deshabilitados: orden descartada', throttle_duration_sec=2.0)
+
+        elif linea == 'HOME START':
+            self.get_logger().info('Homing en curso')
+        elif linea.startswith('HOME OK'):
+            # "HOME OK R711": rango en décimas de grado a cada lado del centro
+            rango = int(linea.split()[-1][1:]) / 10.0
+            self.get_logger().info(f'Homing completo: rango útil ±{rango:.1f}°')
+        elif linea.startswith('HOME ERR'):
+            motivo = linea[len('HOME ERR '):]
+            self.get_logger().error(f'El homing falló: {motivo}')
+        elif linea == 'BUSY':
+            self.get_logger().warning(
+                'Homing en curso: orden descartada', throttle_duration_sec=2.0)
+
         else:
             self.get_logger().warning(f'Línea inesperada del micro: "{linea}"')
 
@@ -136,7 +178,6 @@ class NodoPuenteSerie(Node):
     def destroy_node(self):
         self.cerrar_puerto()  # Libera el puerto al apagar el nodo
         super().destroy_node()
-
 
 def main():
     rclpy.init()
