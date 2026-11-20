@@ -46,6 +46,7 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'clase_objetivo': LaunchConfiguration('clase'),
+            'umbral_confianza': 0.3,
         }],
     )
 
@@ -68,6 +69,21 @@ def generate_launch_description():
         }],
     )
 
+    # Recibe el joystick del ESP32 por UDP y lo publica en /joy.
+    joystick = Node(
+        package='seguidor',
+        executable='nodo_joystick',
+        output='screen',
+    )
+
+    # Elige quién mueve los motores: el controlador (/cmd_auto) o el joystick (/joy),
+    # según el interruptor del ESP32. Publica en /cmd_angulos, que escucha el puente.
+    selector = Node(
+        package='seguidor',
+        executable='nodo_selector',
+        output='screen',
+    )
+
     # El orden de la lista no garantiza el orden de arranque.
     return LaunchDescription([
         arg_clase,
@@ -76,4 +92,6 @@ def generate_launch_description():
         detector,
         puente,
         control,
+        joystick,
+        selector,
     ])
