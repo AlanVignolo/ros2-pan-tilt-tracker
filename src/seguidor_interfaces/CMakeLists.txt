@@ -9,6 +9,7 @@ find_package(rosidl_default_generators REQUIRED)
 # Le dice al generador qué archivos de interfaz tiene este paquete.
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SetTarget.srv"
+  "action/Buscar.action"
 )
 
 ament_package()

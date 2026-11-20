@@ -19,6 +19,9 @@
   <!-- Marca este paquete como un paquete de interfaces -->
   <member_of_group>rosidl_interface_packages</member_of_group>
 
+  <!-- Las acciones usan mensajes internos de ROS2 para el estado y la cancelación -->
+  <depend>action_msgs</depend>
+
   <export>
     <build_type>ament_cmake</build_type>
   </export>
