@@ -1,0 +1,10 @@
+# Objetivo: velocidad del barrido en grados por segundo
+float64 velocidad
+---
+# Resultado: si lo encontró, y en qué ángulo de pan
+bool encontrado
+float64 pan
+---
+# Avance: dónde está la cámara y qué parte del barrido recorrió (0.0 a 1.0)
+float64 pan
+float64 progreso
