@@ -46,8 +46,12 @@ class NodoControl(Node):
 
         self.add_on_set_parameters_callback(self.al_cambiar_parametros)  # Tuning en caliente
 
-        self.pub = self.create_publisher(Float64MultiArray, '/cmd_angulos', 10)
+        # Publica en /cmd_auto: el selector decide si llega a los motores.
+        self.pub = self.create_publisher(Float64MultiArray, '/cmd_auto', 10)
         self.create_subscription(Detection2D, '/deteccion', self.corregir, 10)
+        # Escucha lo que realmente se mandó a los motores, venga del controlador
+        # o del joystick, para continuar desde ahí al volver a modo automático.
+        self.create_subscription(Float64MultiArray, '/cmd_angulos', self.sincronizar, 10)
 
     def al_cambiar_parametros(self, parametros):
         for p in parametros:
@@ -76,6 +80,11 @@ class NodoControl(Node):
         msg = Float64MultiArray()
         msg.data = [self.pan, self.tilt]  # Formato que espera nodo_puente_serie
         self.pub.publish(msg)
+
+    def sincronizar(self, msg):
+        """Actualiza el ángulo propio con el último enviado a los motores."""
+        if len(msg.data) == 2:
+            self.pan, self.tilt = msg.data[0], msg.data[1]
 
 
 def main():
