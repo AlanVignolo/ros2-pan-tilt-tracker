@@ -1,0 +1,6 @@
+# Pedido: nombre de la clase de YOLO a seguir, en inglés (cat, dog, person...)
+string clase
+---
+# Respuesta: si se aceptó el cambio, y un mensaje que lo explica
+bool exito
+string mensaje
