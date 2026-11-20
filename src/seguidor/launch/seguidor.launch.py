@@ -66,6 +66,9 @@ def generate_launch_description():
             'ganancia': LaunchConfiguration('ganancia'),
             'signo_pan': -1.0,
             'signo_tilt': -1.0,
+            # Rango útil del pan medido con el homing (±71°), con margen.
+            'pan_min': -70.0,
+            'pan_max': 70.0,
         }],
     )
 
@@ -82,6 +85,11 @@ def generate_launch_description():
         package='seguidor',
         executable='nodo_selector',
         output='screen',
+        parameters=[{
+            # Mismos límites que el controlador.
+            'pan_min': -70.0,
+            'pan_max': 70.0,
+        }],
     )
 
     # El orden de la lista no garantiza el orden de arranque.
