@@ -82,6 +82,24 @@ static uint8_t en_informado = 0;
 // Sirve para medir cuánto tiempo lleva el pin en un valor distinto.
 static uint32_t t_en_estable = 0;
 
+// --- Homing ---
+#define HOMING_DIVISOR    4      // durante el homing, un paso cada 4 ciclos del timer
+#define HOMING_RECORRIDO  3200   // pasos máximos para buscar cada botón (2 vueltas)
+#define MARGEN_PASOS      22     // unos 5° de margen antes de cada botón
+
+static volatile uint8_t divisor_vel = 1;  // 1 = velocidad normal
+static uint8_t cuenta_vel = 0;            // cuenta los ciclos del timer para el divisor
+
+// Etapa del homing: 0 = inactivo, 1 = buscando FC_NEG, 2 = buscando FC_POS, 3 = yendo al centro
+static uint8_t homing_estado = 0;
+static uint8_t homing_hecho = 0;          // 1 cuando se completó al menos un homing
+static int32_t homing_pos_neg = 0;        // posición donde se tocó FC_NEG, en pasos
+
+// Resultado del homing, en pasos, con el 0 en el centro del recorrido
+static int32_t fc_neg_pasos = 0;          // dónde está el botón negativo
+static int32_t fc_pos_pasos = 0;          // dónde está el botón positivo
+static int32_t pan_lim_pasos = 0;         // límite de software, a cada lado del 0
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -144,13 +162,27 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	return;
 	}
 
+	// Velocidad: con divisor_vel mayor a 1, se da un paso solo cada divisor_vel ciclos.
+	if (++cuenta_vel < divisor_vel) return;
+	cuenta_vel = 0;
+
 	int32_t error = pan_obj - pan_pos;
 	if (error == 0) return;
 
 	int8_t dir = (error > 0) ? 1 : -1;
 
-	if (dir > 0 && HAL_GPIO_ReadPin(FC_POS_GPIO_Port, FC_POS_Pin) == FC_ACTIVO) bloqueo_pos = 1;
-	if (dir < 0 && HAL_GPIO_ReadPin(FC_NEG_GPIO_Port, FC_NEG_Pin) == FC_ACTIVO) bloqueo_neg = 1;
+	if (dir > 0 && HAL_GPIO_ReadPin(FC_POS_GPIO_Port, FC_POS_Pin) == FC_ACTIVO)
+	{
+		bloqueo_pos = 1;
+		// Con el homing hecho, la posición del botón se conoce: corregir la cuenta.
+		// No durante un homing, porque ahí justamente se está midiendo.
+		if (homing_hecho && homing_estado == 0) pan_pos = fc_pos_pasos;
+	}
+	if (dir < 0 && HAL_GPIO_ReadPin(FC_NEG_GPIO_Port, FC_NEG_Pin) == FC_ACTIVO)
+	{
+		bloqueo_neg = 1;
+		if (homing_hecho && homing_estado == 0) pan_pos = fc_neg_pasos;
+	}
 
 	if ((dir > 0 && bloqueo_pos) || (dir < 0 && bloqueo_neg))
 	{
@@ -183,6 +215,96 @@ static void informar_en(uint8_t en)
 	HAL_UART_Transmit(&huart2, (uint8_t *)msg, strlen(msg), 100);
 }
 
+// Arranca el homing: primero hacia el botón negativo, despacio.
+static void homing_iniciar(void)
+{
+	bloqueo_pos = 0;   // empezar sin bloqueos viejos
+	bloqueo_neg = 0;
+	divisor_vel = HOMING_DIVISOR;
+	homing_estado = 1;
+	pan_obj = pan_pos - HOMING_RECORRIDO;   // un objetivo lejos, del lado negativo
+}
+
+// Corta el homing por un error, frena el motor y lo informa.
+static void homing_fallo(const char *motivo)
+{
+	char resp[32];
+	divisor_vel = 1;
+	homing_estado = 0;
+	pan_obj = pan_pos;   // frenar donde está
+	snprintf(resp, sizeof(resp), "HOME ERR %s\r\n", motivo);
+	HAL_UART_Transmit(&huart2, (uint8_t *)resp, strlen(resp), 100);
+}
+
+// Máquina de estados del homing. Se llama en cada vuelta del bucle principal.
+static void homing_actualizar(void)
+{
+	char resp[32];
+
+	if (homing_estado == 0) return;   // no hay homing en curso
+
+	// Interruptor apagado a mitad del homing: se aborta.
+	if (!HABILITADO())
+	{
+		homing_fallo("OFF");
+		return;
+	}
+
+	if (homing_estado == 1)   // buscando FC_NEG
+	{
+		if (bloqueo_neg)
+		{
+			// Tocó el botón negativo: anotar dónde, e ir hacia el positivo.
+			homing_pos_neg = pan_pos;
+			pan_obj = pan_pos + HOMING_RECORRIDO;
+			homing_estado = 2;
+		}
+		else if (pan_pos == pan_obj && !bloqueo_neg)
+		{
+			homing_fallo("FC_NEG");   // recorrió 2 vueltas sin tocarlo
+		}
+	}
+	else if (homing_estado == 2)   // buscando FC_POS
+	{
+		if (bloqueo_pos)
+		{
+			// Tocó el positivo: ya se conoce el recorrido completo.
+			int32_t recorrido = pan_pos - homing_pos_neg;
+			int32_t centro = homing_pos_neg + recorrido / 2;
+
+			// Correr el sistema de coordenadas para que el centro sea 0.
+			// Se desactivan las interrupciones un instante para que el timer
+			// no modifique pan_pos justo mientras se lo está cambiando.
+			__disable_irq();
+			pan_pos -= centro;
+			pan_obj = 0;   // y el próximo objetivo es ese centro
+			__enable_irq();
+
+			fc_neg_pasos = homing_pos_neg - centro;
+			fc_pos_pasos = fc_neg_pasos + recorrido;
+			pan_lim_pasos = recorrido / 2 - MARGEN_PASOS;
+			homing_estado = 3;
+		}
+		else if (pan_pos == pan_obj && !bloqueo_pos)
+		{
+			homing_fallo("FC_POS");
+		}
+	}
+	else if (homing_estado == 3)   // yendo al centro
+	{
+		if (pan_pos == 0)
+		{
+			divisor_vel = 1;
+			homing_estado = 0;
+			homing_hecho = 1;
+			// Informar el rango útil, en décimas de grado a cada lado del centro.
+			long rango = (long)pan_lim_pasos * 3600 / PASOS_POR_VUELTA;
+			snprintf(resp, sizeof(resp), "HOME OK R%ld\r\n", rango);
+			HAL_UART_Transmit(&huart2, (uint8_t *)resp, strlen(resp), 100);
+		}
+	}
+}
+
 static void procesar_linea(const char *s)
 {
 	char resp[64];
@@ -194,8 +316,8 @@ static void procesar_linea(const char *s)
 	    int fp = (HAL_GPIO_ReadPin(FC_POS_GPIO_Port, FC_POS_Pin) == FC_ACTIVO);
 		long pos = (long)pan_pos * 3600 / PASOS_POR_VUELTA;
 		long obj = (long)pan_obj * 3600 / PASOS_POR_VUELTA;
-	    snprintf(resp, sizeof(resp), "ST POS%ld OBJ%ld FN%d FP%d BN%d BP%d EN%d\r\n",
-	             pos, obj, fn, fp, bloqueo_neg, bloqueo_pos, HABILITADO());
+	    snprintf(resp, sizeof(resp), "ST POS%ld OBJ%ld FN%d FP%d BN%d BP%d EN%d HM%d\r\n",
+	             pos, obj, fn, fp, bloqueo_neg, bloqueo_pos, HABILITADO(), homing_hecho);
 	    HAL_UART_Transmit(&huart2, (uint8_t *)resp, strlen(resp), 100);
 		return;
 	}
@@ -209,15 +331,45 @@ static void procesar_linea(const char *s)
 	return;
 	}
 
+	// Durante un homing no se acepta ninguna otra orden de movimiento.
+	if (homing_estado != 0)
+	{
+		snprintf(resp, sizeof(resp), "BUSY\r\n");
+		HAL_UART_Transmit(&huart2, (uint8_t *)resp, strlen(resp), 100);
+		return;
+	}
+
+	// Orden H: arrancar el homing.
+	if (strcmp(s, "H") == 0)
+	{
+		homing_iniciar();
+		snprintf(resp, sizeof(resp), "HOME START\r\n");
+		HAL_UART_Transmit(&huart2, (uint8_t *)resp, strlen(resp), 100);
+		return;
+	}
+
 	if(sscanf(s, "P%ld T%ld", &pan, &tilt) == 2)
 	{
 		if (tilt < TILT_MIN) tilt = TILT_MIN;
 		if (tilt > TILT_MAX) tilt = TILT_MAX;
 		servo_tilt(tilt);
 
-	    if (pan < PAN_MIN) pan = PAN_MIN;
-	    if (pan > PAN_MAX) pan = PAN_MAX;
-	    pan_obj = (int32_t)pan * PASOS_POR_VUELTA / 3600;
+		if (homing_hecho)
+		{
+			// Con homing: límites medidos, en pasos.
+			int32_t pasos = (int32_t)pan * PASOS_POR_VUELTA / 3600;
+			if (pasos < -pan_lim_pasos) pasos = -pan_lim_pasos;
+			if (pasos >  pan_lim_pasos) pasos =  pan_lim_pasos;
+			pan_obj = pasos;
+			pan = (long)pasos * 3600 / PASOS_POR_VUELTA;   // para responder el valor aplicado
+		}
+		else
+		{
+			// Sin homing: los límites fijos de siempre.
+			if (pan < PAN_MIN) pan = PAN_MIN;
+			if (pan > PAN_MAX) pan = PAN_MAX;
+			pan_obj = (int32_t)pan * PASOS_POR_VUELTA / 3600;
+		}
 
 		snprintf(resp, sizeof(resp), "OK P%ld T%ld\r\n", pan, tilt);
 	}
@@ -288,6 +440,8 @@ int main(void)
 		  procesar_linea(linea);
 		  linea_lista = 0;
 	  }
+
+	  homing_actualizar();
 
 	// Antirrebote del interruptor, solo para el aviso a la Raspberry.
 	// Si el pin cambió, se espera a que pasen 20 ms seguidos sin volver atrás.
