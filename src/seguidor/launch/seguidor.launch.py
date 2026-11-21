@@ -20,7 +20,7 @@ def generate_launch_description():
     )
     arg_ganancia = DeclareLaunchArgument(
         'ganancia',
-        default_value='0.2',
+        default_value='0.6',
         description='Ganancia proporcional del controlador. Escribirla siempre con punto decimal',
     )
 
