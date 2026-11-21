@@ -92,6 +92,13 @@ def generate_launch_description():
         }],
     )
 
+    # Escucha el micrófono y cambia el objeto a seguir con /set_target.
+    voz = Node(
+        package='seguidor',
+        executable='nodo_voz',
+        output='screen',
+    )
+
     # El orden de la lista no garantiza el orden de arranque.
     return LaunchDescription([
         arg_clase,
@@ -102,4 +109,5 @@ def generate_launch_description():
         control,
         joystick,
         selector,
+        voz,
     ])

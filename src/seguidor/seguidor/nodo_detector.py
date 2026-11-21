@@ -5,7 +5,8 @@ from rcl_interfaces.msg import SetParametersResult
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import String
 from rclpy.parameter import Parameter
 from seguidor_interfaces.srv import SetTarget
 from sensor_msgs.msg import Image
@@ -55,6 +56,11 @@ class NodoDetector(Node):
         self.cuadros = 0
         self.t_reporte = time.monotonic()
 
+        # Publica la clase que se está buscando cada vez que cambia.
+        # TRANSIENT_LOCAL: un nodo que se suscribe después recibe igual el último valor.
+        qos_estado = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.pub_clase = self.create_publisher(String, '/clase_objetivo', qos_estado)
+
     def cambiar_clase(self, nombre):
         """Cambia el objeto a buscar. Devuelve False si la clase no existe."""
         for numero, nombre_modelo in self.modelo.names.items():  # Mapa id -> nombre de COCO
@@ -63,6 +69,9 @@ class NodoDetector(Node):
                 self.id_clase = numero
                 self.detectando = False
                 self.get_logger().info(f'Buscando "{nombre}"')
+                msg = String()
+                msg.data = nombre
+                self.pub_clase.publish(msg)
                 return True
         self.get_logger().warning(f'La clase "{nombre}" no existe en el modelo')
         return False
