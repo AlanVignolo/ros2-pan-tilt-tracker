@@ -16,3 +16,4 @@ __pycache__/
 # Generados por CubeIDE
 Debug/
 Release/
+.vscode/.vscode/
