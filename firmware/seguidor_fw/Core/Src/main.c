@@ -83,12 +83,8 @@ static uint8_t en_informado = 0;
 static uint32_t t_en_estable = 0;
 
 // --- Homing ---
-#define HOMING_DIVISOR    4      // durante el homing, un paso cada 4 ciclos del timer
 #define HOMING_RECORRIDO  3200   // pasos máximos para buscar cada botón (2 vueltas)
 #define MARGEN_PASOS      22     // unos 5° de margen antes de cada botón
-
-static volatile uint8_t divisor_vel = 1;  // 1 = velocidad normal
-static uint8_t cuenta_vel = 0;            // cuenta los ciclos del timer para el divisor
 
 // Etapa del homing: 0 = inactivo, 1 = buscando FC_NEG, 2 = buscando FC_POS, 3 = yendo al centro
 static uint8_t homing_estado = 0;
@@ -99,6 +95,20 @@ static int32_t homing_pos_neg = 0;        // posición donde se tocó FC_NEG, en
 static int32_t fc_neg_pasos = 0;          // dónde está el botón negativo
 static int32_t fc_pos_pasos = 0;          // dónde está el botón positivo
 static int32_t pan_lim_pasos = 0;         // límite de software, a cada lado del 0
+
+// --- Perfil de velocidad del pan ---
+// Velocidades en pasos por ciclo del timer, en punto fijo Q16 (1,0 = 65536).
+// El timer corre a 2000 ciclos/s y un paso ocupa dos ciclos (subir y bajar PUL),
+// así que el máximo posible es 0,5 pasos por ciclo = 1000 pasos/s.
+#define Q16           65536
+#define VEL_MAX       32768   // 0,5 pasos/ciclo = 1000 pasos/s (unos 225°/s)
+#define VEL_MIN       1638    // 0,025 pasos/ciclo = 50 pasos/s, para terminar de llegar
+#define ACELERACION   82      // cuánto puede subir la velocidad por ciclo: 0 a máximo en ~0,2 s
+#define TAU_CICLOS    200     // la velocidad apunta a cubrir la distancia en ~200 ciclos (0,1 s)
+
+static volatile int32_t vel_max = VEL_MAX;   // se baja durante el homing
+static int32_t velocidad = 0;                // velocidad actual, Q16
+static int32_t acumulador = 0;               // cuando llega a Q16, toca dar un paso
 
 /* USER CODE END PV */
 
@@ -159,15 +169,12 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	if (!HABILITADO())
 	{
 	pan_obj = pan_pos;
+	velocidad = 0;     // al volver a ON, la rampa arranca de cero
 	return;
 	}
 
-	// Velocidad: con divisor_vel mayor a 1, se da un paso solo cada divisor_vel ciclos.
-	if (++cuenta_vel < divisor_vel) return;
-	cuenta_vel = 0;
-
 	int32_t error = pan_obj - pan_pos;
-	if (error == 0) return;
+	if (error == 0) { velocidad = 0; return; }
 
 	int8_t dir = (error > 0) ? 1 : -1;
 
@@ -187,6 +194,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	if ((dir > 0 && bloqueo_pos) || (dir < 0 && bloqueo_neg))
 	{
 	pan_obj = pan_pos;
+	velocidad = 0;     // frenado por el botón: la próxima vez arranca de cero
 	return;
 	}
 
@@ -195,8 +203,27 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	HAL_GPIO_WritePin(DIR_GPIO_Port, DIR_Pin,
 					  (dir > 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
 	dir_actual = dir;
+	velocidad = 0;     // al invertir el sentido, se arranca de nuevo desde cero
+	acumulador = 0;
 	return;
 	}
+
+	// --- Perfil de velocidad ---
+	// 1. Velocidad deseada: proporcional a la distancia que falta, con mínimo y máximo.
+	int32_t distancia = (error > 0) ? error : -error;
+	int32_t v_objetivo = (distancia * Q16) / TAU_CICLOS;
+	if (v_objetivo > vel_max) v_objetivo = vel_max;
+	if (v_objetivo < VEL_MIN) v_objetivo = VEL_MIN;
+
+	// 2. Rampa: para subir, de a ACELERACION por ciclo. Para bajar, de inmediato,
+	//    porque la velocidad deseada ya baja de a poco al acercarse.
+	if (velocidad + ACELERACION < v_objetivo) velocidad += ACELERACION;
+	else velocidad = v_objetivo;
+
+	// 3. Acumulador: se suma la velocidad, y se da un paso cada vez que llega a 1,0.
+	acumulador += velocidad;
+	if (acumulador < Q16) return;   // todavía no toca
+	acumulador -= Q16;
 
 	HAL_GPIO_WritePin(PUL_GPIO_Port, PUL_Pin, GPIO_PIN_SET);
 	pul_alto = 1;
@@ -220,7 +247,7 @@ static void homing_iniciar(void)
 {
 	bloqueo_pos = 0;   // empezar sin bloqueos viejos
 	bloqueo_neg = 0;
-	divisor_vel = HOMING_DIVISOR;
+	vel_max = VEL_MAX / 4;
 	homing_estado = 1;
 	pan_obj = pan_pos - HOMING_RECORRIDO;   // un objetivo lejos, del lado negativo
 }
@@ -229,7 +256,7 @@ static void homing_iniciar(void)
 static void homing_fallo(const char *motivo)
 {
 	char resp[32];
-	divisor_vel = 1;
+	vel_max = VEL_MAX;
 	homing_estado = 0;
 	pan_obj = pan_pos;   // frenar donde está
 	snprintf(resp, sizeof(resp), "HOME ERR %s\r\n", motivo);
@@ -294,7 +321,7 @@ static void homing_actualizar(void)
 	{
 		if (pan_pos == 0)
 		{
-			divisor_vel = 1;
+			vel_max = VEL_MAX;   // homing terminado: velocidad normal
 			homing_estado = 0;
 			homing_hecho = 1;
 			// Informar el rango útil, en décimas de grado a cada lado del centro.
