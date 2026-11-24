@@ -6,6 +6,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_msgs.msg import String
+from std_srvs.srv import Trigger   # tipo del servicio /homing: sin datos en el pedido
 from seguidor_interfaces.srv import SetTarget
 import sounddevice
 import vosk
@@ -22,6 +23,9 @@ VOCABULARIO = {
     'silla': 'chair',
     'pelota': 'sports ball',
 }
+
+# Palabras que no eligen un objeto sino que piden una acción al robot.
+COMANDOS = ['calibrar']   # calibrar: hace el homing
 
 
 class NodoVoz(Node):
@@ -45,7 +49,7 @@ class NodoVoz(Node):
         tasa = int(info['default_samplerate'])
 
         # Gramática cerrada: solo estas palabras, más [unk] para todo lo demás.
-        gramatica = json.dumps(list(VOCABULARIO.keys()) + ['[unk]'])
+        gramatica = json.dumps(list(VOCABULARIO.keys()) + COMANDOS + ['[unk]'])
         self.reconocedor = vosk.KaldiRecognizer(modelo, tasa, gramatica)
 
         # Cola para pasar el audio del hilo de PortAudio al hilo de ROS.
@@ -66,6 +70,8 @@ class NodoVoz(Node):
         self.create_subscription(String, '/clase_objetivo', self.recibir_clase, qos_estado)
 
         self.cliente = self.create_client(SetTarget, '/set_target')
+        self.cliente_homing = self.create_client(Trigger, '/homing')
+
         self.create_timer(0.05, self.procesar_audio)
 
         self.get_logger().info(
@@ -92,6 +98,9 @@ class NodoVoz(Node):
     def interpretar(self, texto):
         """Busca en lo escuchado la primera palabra del vocabulario."""
         for palabra in texto.split():
+            if palabra == 'calibrar':
+                self.pedir_homing()
+                return
             if palabra in VOCABULARIO:
                 self.pedir_clase(palabra, VOCABULARIO[palabra])
                 return
@@ -117,6 +126,23 @@ class NodoVoz(Node):
         else:
             self.get_logger().warning(f'No se pudo cambiar: {respuesta.mensaje}')
 
+    def pedir_homing(self):
+        """Pide al puente serie que haga el homing, igual que el ros2 service call."""
+        if not self.cliente_homing.service_is_ready():
+            self.get_logger().warning('El servicio /homing no está disponible')
+            return
+        self.get_logger().info('Escuche "calibrar": pido el homing')
+        futuro = self.cliente_homing.call_async(Trigger.Request())
+        futuro.add_done_callback(self.respuesta_homing)
+
+    def respuesta_homing(self, futuro):
+        """El puente responde enseguida si lo pudo arrancar, no cuando termina."""
+        respuesta = futuro.result()
+        if respuesta.success:
+            self.get_logger().info(respuesta.message)
+        else:
+            self.get_logger().warning(f'No se pudo hacer el homing: {respuesta.message}')
+    
     def destroy_node(self):
         self.flujo.stop()    # deja de leer el micrófono
         self.flujo.close()
