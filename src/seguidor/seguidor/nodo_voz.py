@@ -5,8 +5,11 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
+from rclpy.action import ActionClient
 from std_msgs.msg import String
+from std_srvs.srv import Trigger   # tipo del servicio /homing: sin datos en el pedido
 from seguidor_interfaces.srv import SetTarget
+from seguidor_interfaces.action import Buscar
 import sounddevice
 import vosk
 
@@ -23,6 +26,8 @@ VOCABULARIO = {
     'pelota': 'sports ball',
 }
 
+# Palabras que no eligen un objeto sino que piden una acción al robot.
+COMANDOS = ['calibrar', 'buscar']   # calibrar: hace el homing. buscar: hace un barrido
 
 class NodoVoz(Node):
     """Escucha el micrófono y, al reconocer un objeto, pide seguirlo con /set_target."""
@@ -45,7 +50,7 @@ class NodoVoz(Node):
         tasa = int(info['default_samplerate'])
 
         # Gramática cerrada: solo estas palabras, más [unk] para todo lo demás.
-        gramatica = json.dumps(list(VOCABULARIO.keys()) + ['[unk]'])
+        gramatica = json.dumps(list(VOCABULARIO.keys()) + COMANDOS + ['[unk]'])
         self.reconocedor = vosk.KaldiRecognizer(modelo, tasa, gramatica)
 
         # Cola para pasar el audio del hilo de PortAudio al hilo de ROS.
@@ -66,11 +71,15 @@ class NodoVoz(Node):
         self.create_subscription(String, '/clase_objetivo', self.recibir_clase, qos_estado)
 
         self.cliente = self.create_client(SetTarget, '/set_target')
+        self.cliente_homing = self.create_client(Trigger, '/homing')
+        self.cliente_buscar = ActionClient(self, Buscar, '/buscar')
+
         self.create_timer(0.05, self.procesar_audio)
 
         self.get_logger().info(
-            f'Escuchando a {tasa} Hz. Palabras: {", ".join(VOCABULARIO.keys())}')
-
+            f'Escuchando a {tasa} Hz. Palabras: {", ".join(VOCABULARIO.keys())}. '
+            f'Comandos: {", ".join(COMANDOS)}')
+        
     def recibir_audio(self, datos, cuadros, tiempo, estado):
         """Corre en el hilo de PortAudio: solo guarda el bloque en la cola."""
         self.cola.put(bytes(datos))
@@ -92,6 +101,12 @@ class NodoVoz(Node):
     def interpretar(self, texto):
         """Busca en lo escuchado la primera palabra del vocabulario."""
         for palabra in texto.split():
+            if palabra == 'calibrar':
+                self.pedir_homing()
+                return
+            if palabra == 'buscar':
+                self.pedir_busqueda()
+                return
             if palabra in VOCABULARIO:
                 self.pedir_clase(palabra, VOCABULARIO[palabra])
                 return
@@ -116,6 +131,52 @@ class NodoVoz(Node):
             self.get_logger().info(respuesta.mensaje)
         else:
             self.get_logger().warning(f'No se pudo cambiar: {respuesta.mensaje}')
+
+    def pedir_homing(self):
+        """Pide al puente serie que haga el homing, igual que el ros2 service call."""
+        if not self.cliente_homing.service_is_ready():
+            self.get_logger().warning('El servicio /homing no está disponible')
+            return
+        self.get_logger().info('Escuche "calibrar": pido el homing')
+        futuro = self.cliente_homing.call_async(Trigger.Request())
+        futuro.add_done_callback(self.respuesta_homing)
+
+    def respuesta_homing(self, futuro):
+        """El puente responde enseguida si lo pudo arrancar, no cuando termina."""
+        respuesta = futuro.result()
+        if respuesta.success:
+            self.get_logger().info(respuesta.message)
+        else:
+            self.get_logger().warning(f'No se pudo hacer el homing: {respuesta.message}')
+
+    def pedir_busqueda(self):
+        """Pide al controlador un barrido con la acción /buscar."""
+        if not self.cliente_buscar.server_is_ready():
+            self.get_logger().warning('La acción /buscar no está disponible')
+            return
+        self.get_logger().info('Escuché "buscar": pido un barrido')
+        objetivo = Buscar.Goal()
+        objetivo.velocidad = 0.0   # 0 = que el controlador use su velocidad por defecto
+        futuro = self.cliente_buscar.send_goal_async(objetivo)   # manda el objetivo y sigue
+        futuro.add_done_callback(self.busqueda_aceptada)
+
+    def busqueda_aceptada(self, futuro):
+        """Primer momento: el controlador dice si acepta el barrido."""
+        manejador = futuro.result()   # el "goal handle": representa este pedido en curso
+        if not manejador.accepted:
+            self.get_logger().warning('El controlador rechazó el barrido')
+            return
+        # Segundo momento: pedir el resultado, que llega cuando termina el barrido.
+        futuro_resultado = manejador.get_result_async()
+        futuro_resultado.add_done_callback(self.busqueda_terminada)
+
+    def busqueda_terminada(self, futuro):
+        """El barrido terminó: avisar si encontró el objeto y dónde."""
+        resultado = futuro.result().result   # el primer .result trae también el estado
+        if resultado.encontrado:
+            self.get_logger().info(f'Barrido: encontrado en pan {resultado.pan:.1f}°')
+        else:
+            self.get_logger().info('Barrido: recorrió todo y no lo encontró')
 
     def destroy_node(self):
         self.flujo.stop()    # deja de leer el micrófono
