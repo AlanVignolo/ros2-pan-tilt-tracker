@@ -35,6 +35,11 @@ class NodoDetector(Node):
         self.detectando = False
         self.t_ultima_deteccion = 0.0
 
+        # Publica la clase que se está buscando cada vez que cambia.
+        # TRANSIENT_LOCAL: un nodo que se suscribe después recibe igual el último valor.
+        qos_estado = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.pub_clase = self.create_publisher(String, '/clase_objetivo', qos_estado)
+
         self.clase = None
         self.id_clase = None
         self.cambiar_clase(self.get_parameter('clase_objetivo').value)
@@ -55,11 +60,6 @@ class NodoDetector(Node):
 
         self.cuadros = 0
         self.t_reporte = time.monotonic()
-
-        # Publica la clase que se está buscando cada vez que cambia.
-        # TRANSIENT_LOCAL: un nodo que se suscribe después recibe igual el último valor.
-        qos_estado = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
-        self.pub_clase = self.create_publisher(String, '/clase_objetivo', qos_estado)
 
     def cambiar_clase(self, nombre):
         """Cambia el objeto a buscar. Devuelve False si la clase no existe."""
