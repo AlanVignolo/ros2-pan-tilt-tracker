@@ -1,39 +1,41 @@
+"""Control pan/tilt que mantiene centrado el objeto detectado."""
+
 import time
 
+from rcl_interfaces.msg import SetParametersResult
+import rclpy
 from rclpy.action import ActionServer, CancelResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
-from seguidor_interfaces.action import Buscar
-from rcl_interfaces.msg import SetParametersResult
-import rclpy
 from rclpy.node import Node
+from seguidor_interfaces.action import Buscar
 from std_msgs.msg import Float64MultiArray
 from vision_msgs.msg import Detection2D
 
 
 class NodoControl(Node):
-    """Mueve la cámara para mantener el objeto detectado en el centro de la imagen."""
+    """Lleva el centro de la detección al centro de la imagen y atiende /buscar."""
 
     def __init__(self):
         super().__init__('nodo_control')
 
-        self.declare_parameter('ancho_imagen', 640)  # Resolución real de la cámara
+        self.declare_parameter('ancho_imagen', 640)
         self.declare_parameter('alto_imagen', 480)
-        self.declare_parameter('fov_horizontal', 60.0)  # Campo de visión en grados
-        self.declare_parameter('fov_vertical', 45.0)
-        self.declare_parameter('ganancia', 0.4)  # Kp: fracción del error corregida por cuadro
-        self.declare_parameter('zona_muerta', 2.0)  # Grados de error tolerados, evita jitter
-        self.declare_parameter('signo_pan', -1.0)  # -1: con este montaje, el stepper gira al revés que el error en la imagen
-        self.declare_parameter('signo_tilt', -1.0)  # -1: con este montaje, el servo se mueve al revés que el error en la imagen
-        self.declare_parameter('pan_min', -85.0)  # Límites mecánicos del pan-tilt
+        self.declare_parameter('fov_horizontal', 60.0)    # grados
+        self.declare_parameter('fov_vertical', 45.0)      # grados
+        self.declare_parameter('ganancia', 0.4)           # fracción del error corregida por cuadro
+        self.declare_parameter('zona_muerta', 2.0)        # grados de error que no se corrigen
+        # Los signos dependen del montaje mecánico. En el prototipo actual
+        # ambos ejes se mueven al revés que el error medido en la imagen.
+        self.declare_parameter('signo_pan', -1.0)
+        self.declare_parameter('signo_tilt', -1.0)
+        self.declare_parameter('pan_min', -85.0)
         self.declare_parameter('pan_max', 85.0)
         self.declare_parameter('tilt_min', 0.0)
         self.declare_parameter('tilt_max', 180.0)
         self.declare_parameter('pan_inicial', 0.0)
         self.declare_parameter('tilt_inicial', 90.0)
-
-        # Velocidad del barrido si el objetivo de la acción no indica una (grados/s).
-        self.declare_parameter('velocidad_busqueda', 30.0)
+        self.declare_parameter('velocidad_busqueda', 30.0)  # grados/s si el goal no la indica
 
         self.ancho = self.get_parameter('ancho_imagen').value
         self.alto = self.get_parameter('alto_imagen').value
@@ -49,24 +51,25 @@ class NodoControl(Node):
         self.tilt_max = self.get_parameter('tilt_max').value
         self.velocidad_busqueda = self.get_parameter('velocidad_busqueda').value
 
-        # El último ángulo que mandamos. Arranca en la posición inicial.
+        # Último ángulo comandado. El control es incremental sobre este valor.
         self.pan = self.get_parameter('pan_inicial').value
         self.tilt = self.get_parameter('tilt_inicial').value
 
-        self.add_on_set_parameters_callback(self.al_cambiar_parametros)  # Tuning en caliente
+        self.add_on_set_parameters_callback(self.al_cambiar_parametros)
 
-        # Publica en /cmd_auto: el selector decide si llega a los motores.
+        # Este nodo no manda directo a los motores: publica en /cmd_auto y el
+        # selector decide si esa orden pasa o si manda el joystick.
         self.pub = self.create_publisher(Float64MultiArray, '/cmd_auto', 10)
         self.create_subscription(Detection2D, '/deteccion', self.corregir, 10)
-        # Escucha lo que realmente se mandó a los motores, venga del controlador
-        # o del joystick, para continuar desde ahí al volver a modo automático.
+        # /cmd_angulos es lo que realmente se envió a los motores. Seguirlo evita
+        # un salto al volver de modo manual a automático.
         self.create_subscription(Float64MultiArray, '/cmd_angulos', self.sincronizar, 10)
 
-        self.buscando = False     # True mientras corre una búsqueda
-        self.encontrado = False   # lo pone en True corregir() cuando llega una detección
+        self.buscando = False
+        self.encontrado = False
 
-        # Servidor de la acción /buscar. Va en un grupo propio (Reentrant) para que
-        # su bucle pueda correr en paralelo con los callbacks de detección.
+        # Grupo reentrante para que el bucle de la búsqueda corra en paralelo
+        # con los callbacks de detección (requiere MultiThreadedExecutor).
         self.servidor_buscar = ActionServer(
             self, Buscar, '/buscar',
             execute_callback=self.ejecutar_busqueda,
@@ -76,59 +79,52 @@ class NodoControl(Node):
     def al_cambiar_parametros(self, parametros):
         for p in parametros:
             if p.name in ('ganancia', 'zona_muerta', 'signo_pan', 'signo_tilt'):
-                setattr(self, p.name, p.value)  # El nombre del parámetro coincide con el atributo
+                setattr(self, p.name, p.value)
         return SetParametersResult(successful=True)
 
     def corregir(self, det):
-        # Si hay una búsqueda en curso, esta detección la termina con éxito.
         if self.buscando:
             self.encontrado = True
 
-        # Error en píxeles respecto del centro de la imagen
         error_x = det.bbox.center.position.x - self.ancho / 2
         error_y = det.bbox.center.position.y - self.alto / 2
 
-        # Píxeles -> grados (aproximación lineal del FOV)
+        # Conversión píxeles a grados con aproximación lineal del FOV.
+        # Alcanza para un lente de 60° y evita calibrar la cámara.
         error_pan = error_x * self.fov_h / self.ancho
         error_tilt = error_y * self.fov_v / self.alto
 
-        # Control proporcional incremental sobre la última posición enviada
         if abs(error_pan) > self.zona_muerta:
             self.pan += self.signo_pan * self.ganancia * error_pan
         if abs(error_tilt) > self.zona_muerta:
             self.tilt += self.signo_tilt * self.ganancia * error_tilt
 
-        self.pan = min(max(self.pan, self.pan_min), self.pan_max)  # Saturación a límites
+        # Saturar acá y no solo en el firmware, para que el ángulo guardado
+        # no siga creciendo más allá de lo que el eje puede alcanzar.
+        self.pan = min(max(self.pan, self.pan_min), self.pan_max)
         self.tilt = min(max(self.tilt, self.tilt_min), self.tilt_max)
 
-        msg = Float64MultiArray()
-        msg.data = [self.pan, self.tilt]  # Formato que espera nodo_puente_serie
-        self.pub.publish(msg)
+        self.pub.publish(Float64MultiArray(data=[self.pan, self.tilt]))
 
     def sincronizar(self, msg):
-        """Actualiza el ángulo propio con el último enviado a los motores."""
         if len(msg.data) == 2:
             self.pan, self.tilt = msg.data[0], msg.data[1]
 
     def aceptar_cancelacion(self, goal_handle):
-        """Acepta siempre los pedidos de cancelación.
-
-        Si no se define este callback, rclpy rechaza todas las cancelaciones.
-        """
+        # Sin este callback rclpy rechaza todos los pedidos de cancelación.
         return CancelResponse.ACCEPT
 
     def ejecutar_busqueda(self, goal_handle):
-        """Barre el pan de un extremo al otro hasta que llegue una detección."""
+        """Barre el pan hasta pan_max y luego hasta pan_min, o hasta detectar el objeto."""
         velocidad = goal_handle.request.velocidad
         if velocidad <= 0.0:
             velocidad = self.velocidad_busqueda
 
-        periodo = 0.05                 # un paso cada 50 ms
-        paso = velocidad * periodo     # grados por paso
-        pan = self.pan                 # variable propia del bucle, arranca donde está la cámara
-        direccion = 1.0                # primero hacia pan_max, después hacia pan_min
+        periodo = 0.05
+        paso = velocidad * periodo
+        pan = self.pan
+        direccion = 1.0
 
-        # Recorrido completo: hasta pan_max, y de ahí hasta pan_min.
         total = (self.pan_max - pan) + (self.pan_max - self.pan_min)
         recorrido = 0.0
 
@@ -140,7 +136,6 @@ class NodoControl(Node):
         avance = Buscar.Feedback()
 
         while True:
-            # 1. ¿Pidieron cancelar?
             if goal_handle.is_cancel_requested:
                 self.buscando = False
                 goal_handle.canceled()
@@ -149,7 +144,7 @@ class NodoControl(Node):
                 resultado.pan = self.pan
                 return resultado
 
-            # 2. ¿Llegó una detección? (la marca corregir() desde otro hilo)
+            # self.encontrado lo modifica corregir() desde otro hilo del executor.
             if self.encontrado:
                 self.buscando = False
                 goal_handle.succeed()
@@ -158,7 +153,6 @@ class NodoControl(Node):
                 resultado.pan = self.pan
                 return resultado
 
-            # 3. ¿Recorrió todo sin encontrar?
             if recorrido >= total:
                 self.buscando = False
                 goal_handle.abort()
@@ -167,18 +161,15 @@ class NodoControl(Node):
                 resultado.pan = self.pan
                 return resultado
 
-            # 4. Dar un paso del barrido
             pan += direccion * paso
             recorrido += paso
             if pan >= self.pan_max:
                 pan = self.pan_max
-                direccion = -1.0   # llegó al extremo: dar la vuelta
+                direccion = -1.0
             pan = max(pan, self.pan_min)
 
             self.pan = pan
-            msg = Float64MultiArray()
-            msg.data = [self.pan, self.tilt]
-            self.pub.publish(msg)
+            self.pub.publish(Float64MultiArray(data=[self.pan, self.tilt]))
 
             avance.pan = pan
             avance.progreso = min(recorrido / total, 1.0)
@@ -190,7 +181,6 @@ class NodoControl(Node):
 def main():
     rclpy.init()
     nodo = NodoControl()
-    # Ejecutor de varios hilos: permite correr la búsqueda y las detecciones en paralelo.
     ejecutor = MultiThreadedExecutor()
     ejecutor.add_node(nodo)
     try:

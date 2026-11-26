@@ -1,10 +1,12 @@
-# Objetivo: velocidad del barrido en grados por segundo
-float64 velocidad
+# Barrido del pan hasta detectar la clase objetivo.
+
+# Goal
+float64 velocidad    # grados/s. 0 o negativo usa la velocidad por defecto del controlador
 ---
-# Resultado: si lo encontró, y en qué ángulo de pan
+# Result
 bool encontrado
-float64 pan
+float64 pan          # ángulo de pan al terminar, en grados
 ---
-# Avance: dónde está la cámara y qué parte del barrido recorrió (0.0 a 1.0)
-float64 pan
-float64 progreso
+# Feedback
+float64 pan          # ángulo de pan actual, en grados
+float64 progreso     # fracción del recorrido completada, de 0.0 a 1.0
