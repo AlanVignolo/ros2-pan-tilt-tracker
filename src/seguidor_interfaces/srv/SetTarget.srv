@@ -1,6 +1,8 @@
-# Pedido: nombre de la clase de YOLO a seguir, en inglés (cat, dog, person...)
-string clase
+# Cambia la clase que sigue el detector.
+
+# Request
+string clase      # nombre COCO en inglés (cat, dog, person...)
 ---
-# Respuesta: si se aceptó el cambio, y un mensaje que lo explica
+# Response
 bool exito
-string mensaje
+string mensaje    # confirmación, o el motivo del rechazo
