@@ -1,6 +1,7 @@
 """Comandos de voz offline con Vosk."""
 
 import json
+import os
 import queue
 
 import rclpy
@@ -37,9 +38,9 @@ class NodoVoz(Node):
     def __init__(self):
         super().__init__('nodo_voz')
 
-        self.declare_parameter('modelo', '/home/raspberryAlan/modelos/vosk-model-small-es-0.42')
+        self.declare_parameter('modelo', '~/modelos/vosk-model-small-es-0.42')
         self.declare_parameter('dispositivo', 'USB Composite')    # parte del nombre del micrófono
-        ruta_modelo = self.get_parameter('modelo').value
+        ruta_modelo = os.path.expanduser(self.get_parameter('modelo').value)
         dispositivo = self.get_parameter('dispositivo').value
 
         vosk.SetLogLevel(-1)
