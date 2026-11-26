@@ -1,20 +1,21 @@
+"""Comandos de voz offline con Vosk."""
+
 import json
 import queue
 
 import rclpy
+from rclpy.action import ActionClient
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
-from rclpy.action import ActionClient
-from std_msgs.msg import String
-from std_srvs.srv import Trigger   # tipo del servicio /homing: sin datos en el pedido
-from seguidor_interfaces.srv import SetTarget
 from seguidor_interfaces.action import Buscar
+from seguidor_interfaces.srv import SetTarget
 import sounddevice
+from std_msgs.msg import String
+from std_srvs.srv import Trigger
 import vosk
 
-
-# Palabras que se reconocen y la clase de YOLO (en inglés) que corresponde a cada una.
+# Palabra reconocida -> clase COCO que usa el detector.
 VOCABULARIO = {
     'gato': 'cat',
     'perro': 'dog',
@@ -26,47 +27,48 @@ VOCABULARIO = {
     'pelota': 'sports ball',
 }
 
-# Palabras que no eligen un objeto sino que piden una acción al robot.
-COMANDOS = ['calibrar', 'buscar']   # calibrar: hace el homing. buscar: hace un barrido
+# calibrar -> /homing, buscar -> /buscar
+COMANDOS = ['calibrar', 'buscar']
+
 
 class NodoVoz(Node):
-    """Escucha el micrófono y, al reconocer un objeto, pide seguirlo con /set_target."""
+    """Reconoce palabras del micrófono y las traduce a /set_target, /homing y /buscar."""
 
     def __init__(self):
         super().__init__('nodo_voz')
 
         self.declare_parameter('modelo', '/home/raspberryAlan/modelos/vosk-model-small-es-0.42')
-        # Parte del nombre del microfono
-        self.declare_parameter('dispositivo', 'USB Composite')
+        self.declare_parameter('dispositivo', 'USB Composite')    # parte del nombre del micrófono
         ruta_modelo = self.get_parameter('modelo').value
         dispositivo = self.get_parameter('dispositivo').value
 
-        vosk.SetLogLevel(-1) # silencia los mensajes LOG de Vosk
+        vosk.SetLogLevel(-1)
         modelo = vosk.Model(ruta_modelo)
 
-        # Se usa la frecuencia propia del micrófono: Vosk convierte internamente
-        # a la del modelo, y así no dependemos de que el micrófono soporte 16 kHz.
+        # Se usa la frecuencia nativa del micrófono y Vosk remuestrea internamente.
+        # Así no depende de que el micrófono soporte 16 kHz.
         info = sounddevice.query_devices(dispositivo, 'input')
         tasa = int(info['default_samplerate'])
 
-        # Gramática cerrada: solo estas palabras, más [unk] para todo lo demás.
+        # Gramática cerrada: limita el reconocimiento a estas palabras y baja
+        # mucho los falsos positivos con el modelo chico.
         gramatica = json.dumps(list(VOCABULARIO.keys()) + COMANDOS + ['[unk]'])
         self.reconocedor = vosk.KaldiRecognizer(modelo, tasa, gramatica)
 
-        # Cola para pasar el audio del hilo de PortAudio al hilo de ROS.
+        # El callback de audio corre en el hilo de PortAudio. La cola pasa los
+        # bloques al hilo de ROS, donde se hace el reconocimiento.
         self.cola = queue.Queue()
         self.flujo = sounddevice.RawInputStream(
             samplerate=tasa,
-            blocksize=tasa // 4,      # bloques de un cuarto de segundo
-            dtype='int16',            # el formato que espera Vosk
+            blocksize=tasa // 4,
+            dtype='int16',
             channels=1,
             device=dispositivo,
             callback=self.recibir_audio)
         self.flujo.start()
 
-        # Clase que está buscando el detector, venga de donde venga el cambio.
         self.clase_actual = None
-        # La QoS tiene que coincidir con la del publicador para recibir el último valor.
+        # Misma QoS que el publicador para recibir el último valor aunque se publicó antes.
         qos_estado = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(String, '/clase_objetivo', self.recibir_clase, qos_estado)
 
@@ -79,27 +81,22 @@ class NodoVoz(Node):
         self.get_logger().info(
             f'Escuchando a {tasa} Hz. Palabras: {", ".join(VOCABULARIO.keys())}. '
             f'Comandos: {", ".join(COMANDOS)}')
-        
+
     def recibir_audio(self, datos, cuadros, tiempo, estado):
-        """Corre en el hilo de PortAudio: solo guarda el bloque en la cola."""
         self.cola.put(bytes(datos))
 
     def recibir_clase(self, msg):
-        """El detector anunció la clase que está buscando."""
         self.clase_actual = msg.data
 
     def procesar_audio(self):
-        """Corre en el timer de ROS: pasa el audio de la cola al reconocedor."""
         while not self.cola.empty():
-            # AcceptWaveform devuelve True cuando detecta el final de una frase
-            # (un silencio después de hablar). Recién ahí hay un resultado completo.
+            # AcceptWaveform devuelve True al detectar el silencio que cierra una frase.
             if self.reconocedor.AcceptWaveform(self.cola.get()):
                 texto = json.loads(self.reconocedor.Result())['text']
                 if texto:
                     self.interpretar(texto)
 
     def interpretar(self, texto):
-        """Busca en lo escuchado la primera palabra del vocabulario."""
         for palabra in texto.split():
             if palabra == 'calibrar':
                 self.pedir_homing()
@@ -122,8 +119,8 @@ class NodoVoz(Node):
         self.get_logger().info(f'Escuché "{palabra}": pido seguir "{clase}"')
         pedido = SetTarget.Request()
         pedido.clase = clase
-        futuro = self.cliente.call_async(pedido) # manda el pedido y sigue
-        futuro.add_done_callback(self.respuesta_recibida)  # se ejecuta al llegar la respuesta
+        futuro = self.cliente.call_async(pedido)
+        futuro.add_done_callback(self.respuesta_recibida)
 
     def respuesta_recibida(self, futuro):
         respuesta = futuro.result()
@@ -133,16 +130,15 @@ class NodoVoz(Node):
             self.get_logger().warning(f'No se pudo cambiar: {respuesta.mensaje}')
 
     def pedir_homing(self):
-        """Pide al puente serie que haga el homing, igual que el ros2 service call."""
         if not self.cliente_homing.service_is_ready():
             self.get_logger().warning('El servicio /homing no está disponible')
             return
-        self.get_logger().info('Escuche "calibrar": pido el homing')
+        self.get_logger().info('Escuché "calibrar": pido el homing')
         futuro = self.cliente_homing.call_async(Trigger.Request())
         futuro.add_done_callback(self.respuesta_homing)
 
     def respuesta_homing(self, futuro):
-        """El puente responde enseguida si lo pudo arrancar, no cuando termina."""
+        # El puente responde al iniciar el homing, no al terminarlo.
         respuesta = futuro.result()
         if respuesta.success:
             self.get_logger().info(respuesta.message)
@@ -150,36 +146,31 @@ class NodoVoz(Node):
             self.get_logger().warning(f'No se pudo hacer el homing: {respuesta.message}')
 
     def pedir_busqueda(self):
-        """Pide al controlador un barrido con la acción /buscar."""
         if not self.cliente_buscar.server_is_ready():
             self.get_logger().warning('La acción /buscar no está disponible')
             return
         self.get_logger().info('Escuché "buscar": pido un barrido')
         objetivo = Buscar.Goal()
-        objetivo.velocidad = 0.0   # 0 = que el controlador use su velocidad por defecto
-        futuro = self.cliente_buscar.send_goal_async(objetivo)   # manda el objetivo y sigue
+        objetivo.velocidad = 0.0    # 0 usa la velocidad por defecto del controlador
+        futuro = self.cliente_buscar.send_goal_async(objetivo)
         futuro.add_done_callback(self.busqueda_aceptada)
 
     def busqueda_aceptada(self, futuro):
-        """Primer momento: el controlador dice si acepta el barrido."""
-        manejador = futuro.result()   # el "goal handle": representa este pedido en curso
+        manejador = futuro.result()
         if not manejador.accepted:
             self.get_logger().warning('El controlador rechazó el barrido')
             return
-        # Segundo momento: pedir el resultado, que llega cuando termina el barrido.
-        futuro_resultado = manejador.get_result_async()
-        futuro_resultado.add_done_callback(self.busqueda_terminada)
+        manejador.get_result_async().add_done_callback(self.busqueda_terminada)
 
     def busqueda_terminada(self, futuro):
-        """El barrido terminó: avisar si encontró el objeto y dónde."""
-        resultado = futuro.result().result   # el primer .result trae también el estado
+        resultado = futuro.result().result
         if resultado.encontrado:
             self.get_logger().info(f'Barrido: encontrado en pan {resultado.pan:.1f}°')
         else:
             self.get_logger().info('Barrido: recorrió todo y no lo encontró')
 
     def destroy_node(self):
-        self.flujo.stop()    # deja de leer el micrófono
+        self.flujo.stop()
         self.flujo.close()
         super().destroy_node()
 
@@ -189,7 +180,7 @@ def main():
     nodo = NodoVoz()
     try:
         rclpy.spin(nodo)
-    except(KeyboardInterrupt, ExternalShutdownException):
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         nodo.destroy_node()
