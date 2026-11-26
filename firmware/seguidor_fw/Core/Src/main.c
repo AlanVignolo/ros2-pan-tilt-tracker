@@ -47,68 +47,69 @@ TIM_HandleTypeDef htim3;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-static uint8_t rx_byte;                 // el byte que acaba de llegar
-static char rx_buf[32];                 // la línea que se está armando
-static uint8_t rx_len = 0;              // cuántos caracteres lleva
-static char linea[32];                  // la última línea completa
+
+/* --- Recepción UART --- */
+static uint8_t rx_byte;                    // byte recibido por interrupción
+static char rx_buf[32];                    // línea en construcción
+static uint8_t rx_len = 0;
+static char linea[32];                     // última línea completa, para el bucle principal
 static volatile uint8_t linea_lista = 0;
 
-#define SERVO_US_MIN   500   // pulso para 0°
-#define SERVO_US_MAX   2000   // pulso para 180°
-#define TILT_MIN       0      // décimas de grado
+/* --- Tilt (servo SG90 en TIM3 CH1) --- */
+#define SERVO_US_MIN   500      // ancho de pulso para 0°
+#define SERVO_US_MAX   2000     // ancho de pulso para 180°
+#define TILT_MIN       0        // décimas de grado
 #define TILT_MAX       1800
 
-#define PASOS_POR_VUELTA  1600    // 200 pasos x 8 micropasos
-#define PAN_MIN           -900   // décimas de grado
+/* --- Pan (stepper con driver TB6600, pulsos generados en TIM2) --- */
+#define PASOS_POR_VUELTA  1600  // 200 pasos x 8 micropasos
+#define PAN_MIN           -900  // décimas de grado, límites usados mientras no hay homing
 #define PAN_MAX           900
 
-static volatile int32_t pan_pos = 0;   // pasos dados desde el arranque
-static volatile int32_t pan_obj = 0;   // pasos a los que hay que ir
+static volatile int32_t pan_pos = 0;       // posición actual en pasos
+static volatile int32_t pan_obj = 0;       // posición objetivo en pasos
 static uint8_t pul_alto = 0;
 static int8_t dir_actual = 0;
 
-#define FC_ACTIVO   GPIO_PIN_RESET   // botones NO: apretado = 0
-static uint8_t bloqueo_pos = 0;   // se tocó FC_POS, no avanzar hacia +
-static uint8_t bloqueo_neg = 0;   // se tocó FC_NEG, no avanzar hacia −
+/* --- Fines de carrera (NO, activos en bajo) --- */
+#define FC_ACTIVO   GPIO_PIN_RESET
+static uint8_t bloqueo_pos = 0;            // se tocó FC_POS: no avanzar en sentido +
+static uint8_t bloqueo_neg = 0;            // se tocó FC_NEG: no avanzar en sentido -
 
-// Devuelve 1 si el interruptor está en ON (pin a GND = 0), 0 si está en OFF.
-// Es una macro: el compilador reemplaza HABILITADO() por la lectura del pin
-// en cada lugar donde aparece. Evita repetir la misma línea larga 4 veces.
+/* --- Interruptor de habilitación (activo en bajo) --- */
 #define HABILITADO()  (HAL_GPIO_ReadPin(HABILITAR_GPIO_Port, HABILITAR_Pin) == GPIO_PIN_RESET)
 
-// Último estado del interruptor que se le informó a la Raspberry.
-static uint8_t en_informado = 0;
-// Última vez (en ms) que el pin coincidía con lo informado.
-// Sirve para medir cuánto tiempo lleva el pin en un valor distinto.
-static uint32_t t_en_estable = 0;
+static uint8_t en_informado = 0;           // último estado enviado a la Raspberry
+static uint32_t t_en_estable = 0;          // para el antirrebote del aviso
 
-// --- Homing ---
-#define HOMING_RECORRIDO  3200   // pasos máximos para buscar cada botón (2 vueltas)
-#define MARGEN_PASOS      22     // unos 5° de margen antes de cada botón
+/* --- Homing --- */
+#define HOMING_RECORRIDO  3200  // pasos máximos para encontrar cada fin de carrera (2 vueltas)
+#define MARGEN_PASOS      22    // ~5° de margen antes de cada fin de carrera
 
-// Etapa del homing: 0 = inactivo, 1 = buscando FC_NEG, 2 = buscando FC_POS, 3 = yendo al centro
+// 0 inactivo, 1 buscando FC_NEG, 2 buscando FC_POS, 3 yendo al centro
 static uint8_t homing_estado = 0;
-static uint8_t homing_hecho = 0;          // 1 cuando se completó al menos un homing
-static int32_t homing_pos_neg = 0;        // posición donde se tocó FC_NEG, en pasos
+static uint8_t homing_hecho = 0;
+static int32_t homing_pos_neg = 0;
 
-// Resultado del homing, en pasos, con el 0 en el centro del recorrido
-static int32_t fc_neg_pasos = 0;          // dónde está el botón negativo
-static int32_t fc_pos_pasos = 0;          // dónde está el botón positivo
-static int32_t pan_lim_pasos = 0;         // límite de software, a cada lado del 0
+// Resultado del homing en pasos, con el 0 en el centro del recorrido
+static int32_t fc_neg_pasos = 0;
+static int32_t fc_pos_pasos = 0;
+static int32_t pan_lim_pasos = 0;          // límite de software a cada lado del centro
 
-// --- Perfil de velocidad del pan ---
-// Velocidades en pasos por ciclo del timer, en punto fijo Q16 (1,0 = 65536).
-// El timer corre a 2000 ciclos/s y un paso ocupa dos ciclos (subir y bajar PUL),
-// así que el máximo posible es 0,5 pasos por ciclo = 1000 pasos/s.
+/* --- Perfil de velocidad del pan ---
+ * Velocidades en pasos por ciclo de TIM2, en punto fijo Q16 (1.0 = 65536).
+ * TIM2 interrumpe a 2 kHz y cada paso usa dos ciclos (flanco de subida y de
+ * bajada de PUL), así que el máximo es 0.5 pasos/ciclo = 1000 pasos/s.
+ */
 #define Q16           65536
-#define VEL_MAX       32768   // 0,5 pasos/ciclo = 1000 pasos/s (unos 225°/s)
-#define VEL_MIN       1638    // 0,025 pasos/ciclo = 50 pasos/s, para terminar de llegar
-#define ACELERACION   82      // cuánto puede subir la velocidad por ciclo: 0 a máximo en ~0,2 s
-#define TAU_CICLOS    200     // la velocidad apunta a cubrir la distancia en ~200 ciclos (0,1 s)
+#define VEL_MAX       32768     // 0.5 pasos/ciclo, ~225°/s
+#define VEL_MIN       1638      // 0.025 pasos/ciclo, para completar la llegada
+#define ACELERACION   82        // incremento por ciclo: de 0 a VEL_MAX en ~0.2 s
+#define TAU_CICLOS    200       // la velocidad apunta a cubrir la distancia en ~0.1 s
 
-static volatile int32_t vel_max = VEL_MAX;   // se baja durante el homing
-static int32_t velocidad = 0;                // velocidad actual, Q16
-static int32_t acumulador = 0;               // cuando llega a Q16, toca dar un paso
+static volatile int32_t vel_max = VEL_MAX; // se reduce durante el homing
+static int32_t velocidad = 0;              // velocidad actual, Q16
+static int32_t acumulador = 0;             // al llegar a Q16 se da un paso
 
 /* USER CODE END PV */
 
@@ -124,21 +125,24 @@ static void MX_TIM2_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/* Arma líneas terminadas en '\r' o '\n'. Si el bucle principal todavía no
+ * procesó la línea anterior, la nueva se descarta en lugar de pisarla. */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-	if (huart ->Instance == USART2)
+	if (huart->Instance == USART2)
 	{
 		if (rx_byte == '\r' || rx_byte == '\n')
 		{
 			if (rx_len > 0 && !linea_lista)
 			{
 				rx_buf[rx_len] = '\0';
-				memcpy(linea, rx_buf, rx_len +1);
+				memcpy(linea, rx_buf, rx_len + 1);
 				linea_lista = 1;
 			}
 			rx_len = 0;
 		}
-		else if (rx_len < sizeof(rx_buf) -1)
+		else if (rx_len < sizeof(rx_buf) - 1)
 		{
 			rx_buf[rx_len++] = rx_byte;
 		}
@@ -148,29 +152,30 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
 static void servo_tilt(long decimas)
 {
-	uint32_t us = SERVO_US_MIN + (uint32_t) decimas * (SERVO_US_MAX - SERVO_US_MIN) / 1800;
+	uint32_t us = SERVO_US_MIN + (uint32_t)decimas * (SERVO_US_MAX - SERVO_US_MIN) / 1800;
 	__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, us);
 }
 
+/* TIM2 a 2 kHz: genera los pulsos del stepper siguiendo pan_obj con un
+ * perfil de velocidad proporcional a la distancia y rampa de aceleración. */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
 	if (htim->Instance != TIM2) return;
 
 	if (pul_alto)
 	{
-	HAL_GPIO_WritePin(PUL_GPIO_Port, PUL_Pin, GPIO_PIN_RESET);
-	pul_alto = 0;
-	return;
+		HAL_GPIO_WritePin(PUL_GPIO_Port, PUL_Pin, GPIO_PIN_RESET);
+		pul_alto = 0;
+		return;
 	}
 
-	// Interruptor en OFF: no se da ningún paso.
-	// Además se cancela el objetivo, para que al volver a ON
-	// el motor no salte a una orden vieja que quedó pendiente.
+	// Con el interruptor en OFF se descarta el objetivo pendiente, para que
+	// al volver a ON el motor no salte a una orden vieja.
 	if (!HABILITADO())
 	{
-	pan_obj = pan_pos;
-	velocidad = 0;     // al volver a ON, la rampa arranca de cero
-	return;
+		pan_obj = pan_pos;
+		velocidad = 0;
+		return;
 	}
 
 	int32_t error = pan_obj - pan_pos;
@@ -181,8 +186,8 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	if (dir > 0 && HAL_GPIO_ReadPin(FC_POS_GPIO_Port, FC_POS_Pin) == FC_ACTIVO)
 	{
 		bloqueo_pos = 1;
-		// Con el homing hecho, la posición del botón se conoce: corregir la cuenta.
-		// No durante un homing, porque ahí justamente se está midiendo.
+		// Con el homing hecho la posición del fin de carrera es conocida y se usa
+		// para corregir pasos perdidos. Durante el homing no, porque se está midiendo.
 		if (homing_hecho && homing_estado == 0) pan_pos = fc_pos_pasos;
 	}
 	if (dir < 0 && HAL_GPIO_ReadPin(FC_NEG_GPIO_Port, FC_NEG_Pin) == FC_ACTIVO)
@@ -193,36 +198,35 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
 	if ((dir > 0 && bloqueo_pos) || (dir < 0 && bloqueo_neg))
 	{
-	pan_obj = pan_pos;
-	velocidad = 0;     // frenado por el botón: la próxima vez arranca de cero
-	return;
+		pan_obj = pan_pos;
+		velocidad = 0;
+		return;
 	}
 
 	if (dir != dir_actual)
 	{
-	HAL_GPIO_WritePin(DIR_GPIO_Port, DIR_Pin,
-					  (dir > 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-	dir_actual = dir;
-	velocidad = 0;     // al invertir el sentido, se arranca de nuevo desde cero
-	acumulador = 0;
-	return;
+		HAL_GPIO_WritePin(DIR_GPIO_Port, DIR_Pin,
+		                  (dir > 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+		dir_actual = dir;
+		velocidad = 0;    // cada cambio de sentido arranca la rampa desde cero
+		acumulador = 0;
+		return;
 	}
 
-	// --- Perfil de velocidad ---
-	// 1. Velocidad deseada: proporcional a la distancia que falta, con mínimo y máximo.
+	// Velocidad objetivo proporcional a la distancia restante, acotada.
 	int32_t distancia = (error > 0) ? error : -error;
 	int32_t v_objetivo = (distancia * Q16) / TAU_CICLOS;
 	if (v_objetivo > vel_max) v_objetivo = vel_max;
 	if (v_objetivo < VEL_MIN) v_objetivo = VEL_MIN;
 
-	// 2. Rampa: para subir, de a ACELERACION por ciclo. Para bajar, de inmediato,
-	//    porque la velocidad deseada ya baja de a poco al acercarse.
+	// Rampa solo al acelerar. Al frenar no hace falta, porque v_objetivo
+	// ya baja de forma gradual a medida que se acerca.
 	if (velocidad + ACELERACION < v_objetivo) velocidad += ACELERACION;
 	else velocidad = v_objetivo;
 
-	// 3. Acumulador: se suma la velocidad, y se da un paso cada vez que llega a 1,0.
+	// Acumulador de fase: se da un paso cada vez que la suma alcanza 1.0 (Q16).
 	acumulador += velocidad;
-	if (acumulador < Q16) return;   // todavía no toca
+	if (acumulador < Q16) return;
 	acumulador -= Q16;
 
 	HAL_GPIO_WritePin(PUL_GPIO_Port, PUL_Pin, GPIO_PIN_SET);
@@ -233,8 +237,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	if (dir < 0) bloqueo_pos = 0;
 }
 
-// Envía a la Raspberry el estado del interruptor: "EN1" habilitado, "EN0" deshabilitado.
-// Se llama al arrancar y cada vez que el interruptor cambia.
+/* Informa el interruptor a la Raspberry: "EN1" habilitado, "EN0" deshabilitado. */
 static void informar_en(uint8_t en)
 {
 	char msg[8];
@@ -242,69 +245,64 @@ static void informar_en(uint8_t en)
 	HAL_UART_Transmit(&huart2, (uint8_t *)msg, strlen(msg), 100);
 }
 
-// Arranca el homing: primero hacia el botón negativo, despacio.
 static void homing_iniciar(void)
 {
-	bloqueo_pos = 0;   // empezar sin bloqueos viejos
+	bloqueo_pos = 0;
 	bloqueo_neg = 0;
 	vel_max = VEL_MAX / 4;
 	homing_estado = 1;
-	pan_obj = pan_pos - HOMING_RECORRIDO;   // un objetivo lejos, del lado negativo
+	pan_obj = pan_pos - HOMING_RECORRIDO;    // objetivo lejano del lado negativo
 }
 
-// Corta el homing por un error, frena el motor y lo informa.
 static void homing_fallo(const char *motivo)
 {
 	char resp[32];
 	vel_max = VEL_MAX;
 	homing_estado = 0;
-	pan_obj = pan_pos;   // frenar donde está
+	pan_obj = pan_pos;
 	snprintf(resp, sizeof(resp), "HOME ERR %s\r\n", motivo);
 	HAL_UART_Transmit(&huart2, (uint8_t *)resp, strlen(resp), 100);
 }
 
-// Máquina de estados del homing. Se llama en cada vuelta del bucle principal.
+/* Máquina de estados del homing, llamada en cada vuelta del bucle principal.
+ * Busca FC_NEG, luego FC_POS, y redefine el 0 en el centro del recorrido. */
 static void homing_actualizar(void)
 {
 	char resp[32];
 
-	if (homing_estado == 0) return;   // no hay homing en curso
+	if (homing_estado == 0) return;
 
-	// Interruptor apagado a mitad del homing: se aborta.
 	if (!HABILITADO())
 	{
 		homing_fallo("OFF");
 		return;
 	}
 
-	if (homing_estado == 1)   // buscando FC_NEG
+	if (homing_estado == 1)
 	{
 		if (bloqueo_neg)
 		{
-			// Tocó el botón negativo: anotar dónde, e ir hacia el positivo.
 			homing_pos_neg = pan_pos;
 			pan_obj = pan_pos + HOMING_RECORRIDO;
 			homing_estado = 2;
 		}
 		else if (pan_pos == pan_obj && !bloqueo_neg)
 		{
-			homing_fallo("FC_NEG");   // recorrió 2 vueltas sin tocarlo
+			homing_fallo("FC_NEG");
 		}
 	}
-	else if (homing_estado == 2)   // buscando FC_POS
+	else if (homing_estado == 2)
 	{
 		if (bloqueo_pos)
 		{
-			// Tocó el positivo: ya se conoce el recorrido completo.
 			int32_t recorrido = pan_pos - homing_pos_neg;
 			int32_t centro = homing_pos_neg + recorrido / 2;
 
-			// Correr el sistema de coordenadas para que el centro sea 0.
-			// Se desactivan las interrupciones un instante para que el timer
-			// no modifique pan_pos justo mientras se lo está cambiando.
+			// pan_pos también lo modifica la ISR de TIM2, por eso el corrimiento
+			// de coordenadas se hace con las interrupciones deshabilitadas.
 			__disable_irq();
 			pan_pos -= centro;
-			pan_obj = 0;   // y el próximo objetivo es ese centro
+			pan_obj = 0;
 			__enable_irq();
 
 			fc_neg_pasos = homing_pos_neg - centro;
@@ -317,14 +315,14 @@ static void homing_actualizar(void)
 			homing_fallo("FC_POS");
 		}
 	}
-	else if (homing_estado == 3)   // yendo al centro
+	else if (homing_estado == 3)
 	{
 		if (pan_pos == 0)
 		{
-			vel_max = VEL_MAX;   // homing terminado: velocidad normal
+			vel_max = VEL_MAX;
 			homing_estado = 0;
 			homing_hecho = 1;
-			// Informar el rango útil, en décimas de grado a cada lado del centro.
+			// Rango útil en décimas de grado a cada lado del centro.
 			long rango = (long)pan_lim_pasos * 3600 / PASOS_POR_VUELTA;
 			snprintf(resp, sizeof(resp), "HOME OK R%ld\r\n", rango);
 			HAL_UART_Transmit(&huart2, (uint8_t *)resp, strlen(resp), 100);
@@ -332,6 +330,11 @@ static void homing_actualizar(void)
 	}
 }
 
+/* Protocolo ASCII con la Raspberry, una orden por línea:
+ *   S            estado completo        -> "ST POS.. OBJ.. FN.. FP.. BN.. BP.. EN.. HM.."
+ *   H            iniciar homing         -> "HOME START", luego "HOME OK R<rango>" o "HOME ERR <motivo>"
+ *   P<pan> T<t>  mover, décimas de grado -> "OK P<pan> T<tilt>" con los valores aplicados
+ * Con el interruptor en OFF responde "OFF" y durante el homing "BUSY". */
 static void procesar_linea(const char *s)
 {
 	char resp[64];
@@ -339,26 +342,23 @@ static void procesar_linea(const char *s)
 
 	if (strcmp(s, "S") == 0)
 	{
-	    int fn = (HAL_GPIO_ReadPin(FC_NEG_GPIO_Port, FC_NEG_Pin) == FC_ACTIVO);
-	    int fp = (HAL_GPIO_ReadPin(FC_POS_GPIO_Port, FC_POS_Pin) == FC_ACTIVO);
+		int fn = (HAL_GPIO_ReadPin(FC_NEG_GPIO_Port, FC_NEG_Pin) == FC_ACTIVO);
+		int fp = (HAL_GPIO_ReadPin(FC_POS_GPIO_Port, FC_POS_Pin) == FC_ACTIVO);
 		long pos = (long)pan_pos * 3600 / PASOS_POR_VUELTA;
 		long obj = (long)pan_obj * 3600 / PASOS_POR_VUELTA;
-	    snprintf(resp, sizeof(resp), "ST POS%ld OBJ%ld FN%d FP%d BN%d BP%d EN%d HM%d\r\n",
-	             pos, obj, fn, fp, bloqueo_neg, bloqueo_pos, HABILITADO(), homing_hecho);
-	    HAL_UART_Transmit(&huart2, (uint8_t *)resp, strlen(resp), 100);
+		snprintf(resp, sizeof(resp), "ST POS%ld OBJ%ld FN%d FP%d BN%d BP%d EN%d HM%d\r\n",
+		         pos, obj, fn, fp, bloqueo_neg, bloqueo_pos, HABILITADO(), homing_hecho);
+		HAL_UART_Transmit(&huart2, (uint8_t *)resp, strlen(resp), 100);
 		return;
 	}
 
-	// Interruptor en OFF: no se mueve nada. Se responde OFF
-	// para que la Raspberry sepa que la orden no se ejecutó.
 	if (!HABILITADO())
 	{
-	snprintf(resp, sizeof(resp), "OFF\r\n");
-	HAL_UART_Transmit(&huart2, (uint8_t *)resp, strlen(resp), 100);
-	return;
+		snprintf(resp, sizeof(resp), "OFF\r\n");
+		HAL_UART_Transmit(&huart2, (uint8_t *)resp, strlen(resp), 100);
+		return;
 	}
 
-	// Durante un homing no se acepta ninguna otra orden de movimiento.
 	if (homing_estado != 0)
 	{
 		snprintf(resp, sizeof(resp), "BUSY\r\n");
@@ -366,7 +366,6 @@ static void procesar_linea(const char *s)
 		return;
 	}
 
-	// Orden H: arrancar el homing.
 	if (strcmp(s, "H") == 0)
 	{
 		homing_iniciar();
@@ -375,7 +374,7 @@ static void procesar_linea(const char *s)
 		return;
 	}
 
-	if(sscanf(s, "P%ld T%ld", &pan, &tilt) == 2)
+	if (sscanf(s, "P%ld T%ld", &pan, &tilt) == 2)
 	{
 		if (tilt < TILT_MIN) tilt = TILT_MIN;
 		if (tilt > TILT_MAX) tilt = TILT_MAX;
@@ -383,16 +382,15 @@ static void procesar_linea(const char *s)
 
 		if (homing_hecho)
 		{
-			// Con homing: límites medidos, en pasos.
+			// Límites medidos por el homing, en pasos.
 			int32_t pasos = (int32_t)pan * PASOS_POR_VUELTA / 3600;
 			if (pasos < -pan_lim_pasos) pasos = -pan_lim_pasos;
 			if (pasos >  pan_lim_pasos) pasos =  pan_lim_pasos;
 			pan_obj = pasos;
-			pan = (long)pasos * 3600 / PASOS_POR_VUELTA;   // para responder el valor aplicado
+			pan = (long)pasos * 3600 / PASOS_POR_VUELTA;
 		}
 		else
 		{
-			// Sin homing: los límites fijos de siempre.
 			if (pan < PAN_MIN) pan = PAN_MIN;
 			if (pan > PAN_MAX) pan = PAN_MAX;
 			pan_obj = (int32_t)pan * PASOS_POR_VUELTA / 3600;
@@ -440,16 +438,12 @@ int main(void)
   MX_USART2_UART_Init();
   MX_TIM3_Init();
   MX_TIM2_Init();
-
-
-
   /* USER CODE BEGIN 2 */
   HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
   uint32_t t_led = HAL_GetTick();
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
   HAL_TIM_Base_Start_IT(&htim2);
 
-  // Informar el estado inicial del interruptor al arrancar.
   en_informado = HABILITADO();
   t_en_estable = HAL_GetTick();
   informar_en(en_informado);
@@ -462,45 +456,44 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	  if (linea_lista)
-	  {
-		  procesar_linea(linea);
-		  linea_lista = 0;
-	  }
+    if (linea_lista)
+    {
+      procesar_linea(linea);
+      linea_lista = 0;
+    }
 
-	  homing_actualizar();
+    homing_actualizar();
 
-	// Antirrebote del interruptor, solo para el aviso a la Raspberry.
-	// Si el pin cambió, se espera a que pasen 20 ms seguidos sin volver atrás.
-	uint8_t en_ahora = HABILITADO();
-	if (en_ahora == en_informado)
-	{
-	  t_en_estable = HAL_GetTick();
-	}
-	else if (HAL_GetTick() - t_en_estable >= 20)
-	{
-	  en_informado = en_ahora;
-	  informar_en(en_informado);
-	}
+    // Antirrebote de 20 ms. Solo afecta al aviso EN a la Raspberry, la ISR
+    // de TIM2 lee el pin directamente.
+    uint8_t en_ahora = HABILITADO();
+    if (en_ahora == en_informado)
+    {
+      t_en_estable = HAL_GetTick();
+    }
+    else if (HAL_GetTick() - t_en_estable >= 20)
+    {
+      en_informado = en_ahora;
+      informar_en(en_informado);
+    }
 
-	// LD2: apagado = motores deshabilitados
-	//      fijo     = algún fin de carrera activo
-	//      parpadea = todo normal
-	if (!HABILITADO())
-	{
-	  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
-	}
-	else if (HAL_GPIO_ReadPin(FC_NEG_GPIO_Port, FC_NEG_Pin) == FC_ACTIVO ||
-			 HAL_GPIO_ReadPin(FC_POS_GPIO_Port, FC_POS_Pin) == FC_ACTIVO)
-	{
-	  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
-	}
-	else if (HAL_GetTick() - t_led >= 500)
-	{
-	  t_led = HAL_GetTick();
-	  HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
-	}
-	}
+    // LD2: apagado = motores deshabilitados, fijo = fin de carrera activo,
+    // parpadeo = funcionamiento normal.
+    if (!HABILITADO())
+    {
+      HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+    }
+    else if (HAL_GPIO_ReadPin(FC_NEG_GPIO_Port, FC_NEG_Pin) == FC_ACTIVO ||
+             HAL_GPIO_ReadPin(FC_POS_GPIO_Port, FC_POS_Pin) == FC_ACTIVO)
+    {
+      HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
+    }
+    else if (HAL_GetTick() - t_led >= 500)
+    {
+      t_led = HAL_GetTick();
+      HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+    }
+  }
   /* USER CODE END 3 */
 }
 
