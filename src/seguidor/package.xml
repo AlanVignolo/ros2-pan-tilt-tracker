@@ -2,19 +2,24 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>seguidor</name>
-  <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <version>0.1.0</version>
+  <description>Pan-tilt camera tracker: YOLO detection, proportional control, serial bridge to the motor controller, wireless joystick and voice commands.</description>
   <maintainer email="alanvignolo1999@gmail.com">Alan Vignolo</maintainer>
   <license>Apache-2.0</license>
 
   <depend>rclpy</depend>
+  <depend>rcl_interfaces</depend>
   <depend>std_msgs</depend>
-  <depend>seguidor_interfaces</depend>
   <depend>std_srvs</depend>
-  
+  <depend>sensor_msgs</depend>
+  <depend>vision_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>seguidor_interfaces</depend>
+
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>usb_cam</exec_depend>
+  <exec_depend>python3-serial</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

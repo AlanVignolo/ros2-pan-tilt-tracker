@@ -1,25 +1,25 @@
-import os  # Para armar rutas de carpetas
-from glob import glob  # Para buscar archivos por patrón, como *.launch.py
+from glob import glob
+import os
+
 from setuptools import find_packages, setup
 
 package_name = 'seguidor'
 
 setup(
     name=package_name,
-    version='0.0.0',
+    version='0.1.0',
     packages=find_packages(exclude=['test']),
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-         # Copia todos los launch files a install/share/seguidor/launch
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='Alan Vignolo',
     maintainer_email='alanvignolo1999@gmail.com',
-    description='TODO: Package description',
+    description='Pan-tilt camera tracker with YOLO, serial motor bridge, joystick and voice.',
     license='Apache-2.0',
     extras_require={
         'test': [
@@ -30,10 +30,10 @@ setup(
         'console_scripts': [
             'nodo_puente_serie = seguidor.nodo_puente_serie:main',
             'nodo_detector = seguidor.nodo_detector:main',
-            'nodo_control = seguidor.nodo_control:main',        
+            'nodo_control = seguidor.nodo_control:main',
             'nodo_joystick = seguidor.nodo_joystick:main',
             'nodo_selector = seguidor.nodo_selector:main',
             'nodo_voz = seguidor.nodo_voz:main',
-            ],
+        ],
     },
 )
