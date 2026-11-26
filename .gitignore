@@ -1,19 +1,21 @@
-# pixi environments
+# pixi
 .pixi/*
 !.pixi/config.toml
 
-# Generados por colcon
+# colcon
 build/
 install/
 log/
 
-# Cache de Python
+# Python
 __pycache__/
 
-# Modelos de YOLO (Ultralytics los descarga solos)
+# Pesos de YOLO (Ultralytics los descarga en el primer uso)
 *.pt
 
-# Generados por CubeIDE
+# STM32CubeIDE
 Debug/
 Release/
-.vscode/.vscode/
+
+# Editor
+.vscode/
